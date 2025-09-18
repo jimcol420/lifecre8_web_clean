@@ -1,0 +1,127 @@
+<!doctype html>
+<!-- LifeCre8 — index.html v1.7.2 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>LifeCre8 — Local Web</title>
+
+  <!-- PWA essentials -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0f1320"/>
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="apple-touch-icon" href="icon-192.png"/>
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="css/style.css"/>
+
+  <!-- inline styles for update toast -->
+  <style>
+    #updateToast{position:fixed;left:50%;transform:translateX(-50%);bottom:16px;z-index:3000;display:none;background:var(--panel,#1c2433);color:var(--text,#fff8ea);border:1px solid var(--border,#3b455e);border-radius:12px;box-shadow:0 12px 30px rgba(0,0,0,.25);padding:10px 12px;gap:8px;align-items:center}
+    #updateToast.show{display:flex}
+    #updateToast .btn{white-space:nowrap}
+  </style>
+</head>
+<body>
+  <div class="app">
+
+    <!-- SIDEBAR -->
+    <aside class="sidebar">
+      <button class="sb-icon" title="Discord (stub)">💬</button>
+      <button class="sb-icon" title="Telegram (stub)">📨</button>
+      <button class="sb-icon" title="WhatsApp (stub)">🟢</button>
+      <button class="sb-icon" title="Messenger (stub)">🔵</button>
+      <button class="sb-icon" title="X (stub)">✖️</button>
+      <button class="sb-icon" title="TikTok (stub)">🎵</button>
+      <div class="sb-divider"></div>
+    </aside>
+
+    <!-- MAIN -->
+    <main class="main">
+      <header class="topbar">
+        <div class="wrap">
+          <div class="brand">
+            <div class="dot"></div>
+            <div id="brandName">LifeCre8</div>
+          </div>
+
+          <button class="btn primary" id="addTileBtnTop" title="Add Tile">Add Tile</button>
+
+          <div class="spacer"></div>
+
+          <button class="btn" id="globalSettingsBtn" title="Global Settings">Settings</button>
+          <button class="btn" id="assistantToggle" title="Toggle AI Assistant">AI Assistant</button>
+        </div>
+      </header>
+
+      <section id="grid" class="grid"></section>
+
+      <footer class="footer">© <span id="yr"></span> LifeCre8 — Local Web Shell</footer>
+    </main>
+
+    <!-- RIGHT (AI ASSISTANT) -->
+    <aside class="right" id="assistantPanel">
+      <section class="section">
+        <div class="side-title">AI Assistant</div>
+        <div id="assistantChat" class="assistant-chat"></div>
+        <form id="chatForm" class="chat-form" autocomplete="off">
+          <input id="chatInput" class="input" placeholder="Ask me anything…"/>
+          <button class="btn primary" type="submit">Send</button>
+        </form>
+      </section>
+    </aside>
+  </div>
+
+  <!-- ADD TILE MENU -->
+  <div id="tileMenu" class="tile-menu hidden" role="dialog" aria-modal="true" aria-label="Add Tile">
+    <input id="tileSearch" class="input" placeholder="Type to search"/>
+    <div class="muted" style="margin-top:8px">Enter a topic (creates an Interest tile) or a URL (creates a Web tile).</div>
+  </div>
+
+  <!-- Modal + fullscreen backdrop -->
+  <div id="modal" class="hidden" aria-hidden="true"></div>
+  <div id="fsBackdrop"></div>
+
+  <!-- SW update toast -->
+  <div id="updateToast" role="status" aria-live="polite">
+    <span class="label">Update available</span>
+    <button class="btn sm primary" id="refreshBtn" type="button">Refresh</button>
+    <button class="btn sm" id="dismissBtn" type="button" title="Later">Later</button>
+  </div>
+
+  <!-- Scripts -->
+  <script src="js/main.js"></script>
+
+  <!-- Service worker registration with update prompt -->
+  <script>
+    (function(){
+      if (!('serviceWorker' in navigator)) return;
+      const toast=document.getElementById('updateToast');
+      const refresh=document.getElementById('refreshBtn');
+      const dismiss=document.getElementById('dismissBtn');
+      let waitingSW=null;
+      function show(){toast.classList.add('show')}
+      function hide(){toast.classList.remove('show')}
+      refresh.addEventListener('click',()=>{ if(waitingSW) waitingSW.postMessage({type:'SKIP_WAITING'}); setTimeout(()=>location.reload(),150);});
+      dismiss.addEventListener('click',hide);
+
+      window.addEventListener('load',()=>{
+        navigator.serviceWorker.register('sw.js').then(reg=>{
+          if(reg.waiting){ waitingSW=reg.waiting; show(); }
+          reg.addEventListener('updatefound',()=>{
+            const nw=reg.installing; if(!nw) return;
+            nw.addEventListener('statechange',()=>{
+              if(nw.state==='installed' && navigator.serviceWorker.controller){
+                waitingSW=reg.waiting||nw; show();
+              }
+            });
+          });
+          navigator.serviceWorker.addEventListener('message',(e)=>{
+            if(e.data && e.data.type==='SW_ACTIVATED') location.reload();
+          });
+        }).catch(err=>console.error('[SW] registration failed:',err));
+      });
+    })();
+  </script>
+</body>
+</html>
