@@ -1,14 +1,12 @@
 /* =========================================================
-   LifeCre8 — api/quote.js  v1.10.2
-   Purpose: Return current prices for symbols (e.g., AAPL, MSFT, BTC-USD)
-   - Tries Yahoo Finance first for everything
-   - For crypto (BTC-USD, ETH-USD) also tries CoinGecko
-   - Never 502s: returns a safe fallback if all sources fail
-   - Verbose logs in Vercel “Logs” to diagnose upstream issues
+   LifeCre8 — api/quote.js  v1.11
+   Stocks via Stooq (no key) + Crypto via CoinGecko (no key)
+   - Never throws 502; always returns 200 with results/errors
+   - Verbose logs for easy debugging in Vercel Logs
    ========================================================= */
 
 export default async function handler(req, res) {
-  const startedAt = Date.now();
+  const t0 = Date.now();
   try {
     const raw = (req.query.symbols || "").toString();
     const symbols = raw
@@ -17,95 +15,104 @@ export default async function handler(req, res) {
       .filter(Boolean);
 
     console.log("[/api/quote] symbols:", symbols);
+    if (!symbols.length) return ok(res, { results: {}, errors: ["No symbols provided"] });
 
-    if (!symbols.length) {
-      return ok(res, { results: [], errors: ["No symbols provided"] });
-    }
+    const { equities, cryptos } = splitSymbols(symbols);
 
-    // 1) Try Yahoo for all symbols in one request
-    const yahoo = await getFromYahoo(symbols);
+    // 1) Equities from Stooq
+    const stooqMap = equities.length ? await getFromStooq(equities) : {};
 
-    // 2) For common crypto, fill gaps via CoinGecko if Yahoo missed them
-    const missing = symbols.filter((s) => yahoo[s] == null);
-    let gecko = {};
-    if (missing.some((s) => isCryptoSym(s))) {
-      gecko = await getFromCoinGecko(missing.filter(isCryptoSym));
-    }
+    // 2) Crypto from CoinGecko
+    const geckoMap = cryptos.length ? await getFromCoinGecko(cryptos) : {};
 
-    // 3) Combine and add safe fallbacks for anything still missing
+    // 3) Merge + fallbacks
     const results = {};
     const errors = [];
-    for (const sym of symbols) {
-      if (yahoo[sym] != null) {
-        results[sym] = yahoo[sym];
-      } else if (gecko[sym] != null) {
-        results[sym] = gecko[sym];
+
+    for (const s of symbols) {
+      const v = stooqMap[s] ?? geckoMap[s];
+      if (isFinite(v)) {
+        results[s] = Number(v);
       } else {
-        // Safe fallback so UI never breaks
-        const fallback = mockPrice(sym);
-        results[sym] = fallback.value;
-        errors.push(`Fallback used for ${sym}: ${fallback.note}`);
+        const fb = mockPrice(s);
+        results[s] = fb.value;
+        errors.push(`Fallback used for ${s}: ${fb.note}`);
       }
     }
 
-    const ms = Date.now() - startedAt;
+    const ms = Date.now() - t0;
     console.log(`[/api/quote] done in ${ms}ms results=`, results, "errors=", errors);
-
     return ok(res, { results, errors });
   } catch (err) {
-    // Absolute safety: even if something unexpected happens, we still return 200
     console.error("[/api/quote] UNCAUGHT:", err?.message || err);
-    return ok(res, {
-      results: {},
-      errors: ["Uncaught error in /api/quote: " + (err?.message || String(err))]
-    });
+    return ok(res, { results: {}, errors: ["Uncaught error: " + (err?.message || String(err))] });
   }
 }
 
-/* ------------------ Yahoo Finance ------------------ */
+/* ------------------ Routing helpers ------------------ */
 
-async function getFromYahoo(symbols) {
-  // Yahoo endpoint (no key needed, but can be temp flaky / rate-limited)
-  const url =
-    "https://query1.finance.yahoo.com/v7/finance/quote?symbols=" +
-    encodeURIComponent(symbols.join(","));
+function splitSymbols(all) {
+  const equities = [];
+  const cryptos = [];
+  for (const s of all) {
+    if (/-USD$/.test(s)) cryptos.push(s);
+    else equities.push(s);
+  }
+  return { equities, cryptos };
+}
 
+/* ------------------ Stooq (equities) ------------------ */
+/*
+  API: https://stooq.com/q/l/?s=aapl.us,msft.us&f=sd2t2ohlcv&h&e=csv
+  - We’ll map ticker -> ticker.us (US listing) by default.
+  - Returns CSV; we read Close as the price.
+*/
+async function getFromStooq(symbols) {
   try {
-    console.log("[Yahoo] GET", url);
+    // Convert to Stooq format: aapl -> aapl.us, vod -> vod.uk, etc.
+    // For now assume US: ticker.us (works for AAPL, MSFT, etc.)
+    const stooqSyms = symbols
+      .map((s) => `${s.toLowerCase()}.us`)
+      .join(",");
+
+    const url =
+      "https://stooq.com/q/l/?s=" +
+      encodeURIComponent(stooqSyms) +
+      "&f=sd2t2ohlcv&h&e=csv";
+
+    console.log("[Stooq] GET", url);
     const r = await fetch(url, { headers: { "User-Agent": "lifecre8/1.0" } });
     const text = await r.text();
 
     if (!r.ok) {
-      console.error("[Yahoo] HTTP", r.status, "BODY:", text.slice(0, 200));
+      console.error("[Stooq] HTTP", r.status, "BODY:", text.slice(0, 200));
       return {};
     }
 
-    // Yahoo sometimes returns invalid JSON if blocked by edge. Guard parse.
-    let json;
-    try {
-      json = JSON.parse(text);
-    } catch (e) {
-      console.error("[Yahoo] JSON parse error:", e?.message, "BODY:", text.slice(0, 200));
-      return {};
-    }
-
+    // Parse CSV (very small): Symbol,Date,Time,Open,High,Low,Close,Volume
+    const lines = text.trim().split(/\r?\n/);
     const out = {};
-    const arr = json?.quoteResponse?.result || [];
-    for (const row of arr) {
-      const sym = (row?.symbol || "").toUpperCase();
-      const price =
-        row?.regularMarketPrice ??
-        row?.postMarketPrice ??
-        row?.preMarketPrice ??
-        null;
-      if (sym && isFinite(price)) {
-        out[sym] = Number(price);
+    // Skip header if present
+    const start = lines[0].toLowerCase().startsWith("symbol,") ? 1 : 0;
+
+    for (let i = start; i < lines.length; i++) {
+      const cols = lines[i].split(",");
+      const symbolStooq = (cols[0] || "").toUpperCase(); // e.g., AAPL.US
+      const close = Number(cols[6]); // Close column
+
+      // Map back to original (strip .US)
+      const base = symbolStooq.replace(/\.US$/, "");
+      // Only set if it was requested
+      const wanted = symbols.find((s) => s.toUpperCase() === base);
+      if (wanted && isFinite(close)) {
+        out[wanted] = close;
       }
     }
-    console.log("[Yahoo] parsed:", out);
+
+    console.log("[Stooq] parsed:", out);
     return out;
   } catch (err) {
-    console.error("[Yahoo] EXCEPTION:", err?.message || err);
+    console.error("[Stooq] EXCEPTION:", err?.message || err);
     return {};
   }
 }
@@ -115,11 +122,8 @@ async function getFromYahoo(symbols) {
 const GECKO_MAP = {
   "BTC-USD": "bitcoin",
   "ETH-USD": "ethereum"
+  // add more mappings here if you need them later
 };
-
-function isCryptoSym(sym) {
-  return GECKO_MAP[sym] != null;
-}
 
 async function getFromCoinGecko(cryptoSymbols) {
   const ids = cryptoSymbols
@@ -164,16 +168,14 @@ async function getFromCoinGecko(cryptoSymbols) {
   }
 }
 
-/* ------------------ Helpers ------------------ */
+/* ------------------ Response & Fallback ------------------ */
 
 function ok(res, body) {
-  // cache a tiny bit on the edge (Vercel) but not in the browser
-  res.setHeader("Cache-Control", "no-store, s-maxage=10, stale-while-revalidate=30");
+  res.setHeader("Cache-Control", "no-store, s-maxage=15, stale-while-revalidate=60");
   res.status(200).json(body);
 }
 
 function mockPrice(sym) {
-  // Gentle, believable fallback value
   let base = 100;
   if (/BTC/.test(sym)) base = 65000;
   else if (/ETH/.test(sym)) base = 3200;
@@ -181,6 +183,6 @@ function mockPrice(sym) {
   const jitter = base * 0.0025 * (Math.random() - 0.5) * 2; // ±0.25%
   return {
     value: Number((base + jitter).toFixed(2)),
-    note: "Upstream failed; using safe fallback"
+    note: "Upstream unavailable; using safe fallback"
   };
 }
