@@ -1,0 +1,87 @@
+name: Auto Tag on Version Commit
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: write   # needed to create tags/releases
+
+jobs:
+  autotag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract commit message
+        id: msg
+        run: |
+          # Get the HEAD commit message
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          echo "$COMMIT_MSG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create tag if message starts with vX.Y.Z
+        uses: actions/github-script@v7
+        if: startsWith(steps.msg.outputs.message, 'v')
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const message = `\n${{ toJson(steps.msg.outputs.message) }}`.trim();
+            // parse first token, e.g. "v1.11.2: some notes"
+            const firstLine = message.split('\n')[0];
+            const firstToken = firstLine.split(/\s+/)[0];
+            const semver = /^v\d+\.\d+\.\d+$/;
+            if (!semver.test(firstToken)) {
+              core.info(`Commit does not start with semantic tag (vX.Y.Z). Skipping. Found: ${firstToken}`);
+              return;
+            }
+            const tag = firstToken;
+
+            // check if tag exists
+            try {
+              await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag
+              });
+              core.info(`Release ${tag} already exists. Skipping.`);
+              return;
+            } catch (e) {
+              core.info(`Tag ${tag} not found as release; will create.`);
+            }
+
+            // get the commit SHA we’re tagging
+            const sha = context.sha;
+
+            // create lightweight tag ref if it doesn't exist
+            try {
+              await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `tags/${tag}`
+              });
+              core.info(`Git ref refs/tags/${tag} already exists.`);
+            } catch (e) {
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `refs/tags/${tag}`,
+                sha
+              });
+              core.info(`Created git tag ${tag} on ${sha}`);
+            }
+
+            // create a GitHub Release for convenience (optional)
+            await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: tag,
+              body: `Auto-created from commit:\n\n${message}`,
+              draft: false,
+              prerelease: false
+            });
+            core.info(`Created release ${tag}.`);
