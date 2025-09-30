@@ -1,13 +1,10 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.10.0
-   BASE: v1.9.0 (no features removed)
-   + AI intent-router for Add Tile (/api/ai/route) with fallback
-   + AI summaries/images for Daily Brief (/api/ai/summarize) with fallback
+   LifeCre8 — main.js  v1.9.0
    - Solar + Ice themes
    - Modal safety-net (close on Save/Cancel/backdrop/Esc)
    - LIVE NEWS via /api/rss (real RSS → JSON) with presets
-   - LIVE MARKETS via /api/quote (Yahoo → JSON) with presets
-   - Smart "Add Tile" commands (kept as fallback)
+   - LIVE MARKETS via /api/quote (Yahoo Finance → JSON) with presets
+   - Smart "Add Tile" commands: "news tech", "news world", etc.
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -16,7 +13,7 @@ const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
 const K_PREFS      = "lifecre8.prefs"; // theme, density
-const DATA_VERSION = 6;
+const DATA_VERSION = 5;
 
 /* ===== Presets ===== */
 const RSS_PRESETS = {
@@ -51,8 +48,8 @@ let chat        = JSON.parse(localStorage.getItem(K_CHAT)      || "[]");
 if (!chat.length) chat = [{ role:'ai', text:"Hi! I'm your AI Assistant. Ask me anything." }];
 
 let prefs = JSON.parse(localStorage.getItem(K_PREFS) || "{}");
-if (!prefs.theme) prefs.theme = "solar";
-if (!prefs.density) prefs.density = "comfortable";
+if (!prefs.theme) prefs.theme = "solar";      // "solar" | "ice"
+if (!prefs.density) prefs.density = "comfortable"; // "comfortable" | "compact"
 document.body.classList.toggle('theme-ice', prefs.theme === 'ice');
 document.body.classList.toggle('density-compact', prefs.density === 'compact');
 
@@ -116,7 +113,7 @@ function ytPlaylistMarkup(playlist, currentId) {
 /* -----------------------------
    Web tile
 ----------------------------- */
-function webTileMarkup(url, mode = "preview") {
+function webTileMarkup(url, mode = "embed") {
   const host = hostOf(url);
   const favicon = host ? `https://www.google.com/s2/favicons?domain=${host}&sz=32` : "";
   if (mode === "embed") {
@@ -166,85 +163,58 @@ function spotifyMarkup(spotifyUrl) {
 }
 
 /* -----------------------------
-   RSS tile (LIVE via /api/rss) + AI summarize (/api/ai/summarize)
+   RSS tile (LIVE via /api/rss)
 ----------------------------- */
-function rssCard(i) {
-  // Render a nicer card-style item with optional image + summary
-  const img = i.image ? `<img src="${i.image}" alt="" style="width:92px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--border);background:#0a1522;margin-right:10px"/>` : "";
-  const summary = i.summary ? `<div class="muted" style="margin-top:4px">${i.summary}</div>` : "";
-  const meta = [i.source, i.time].filter(Boolean).join(" — ");
-  return `
-    <a class="rss-card" href="${i.link}" target="_blank" rel="noopener"
-       style="display:flex;align-items:center;text-decoration:none;color:inherit;border:1px solid var(--border);border-radius:12px;padding:8px 10px;background:rgba(0,0,0,.03);gap:10px">
-      ${img}
-      <div style="min-width:0">
-        <div style="font-weight:700;line-height:1.25">${i.title}</div>
-        ${summary}
-        <div class="muted" style="margin-top:4px">${meta}</div>
-      </div>
-    </a>
-  `;
-}
 function rssMarkup(items) {
-  const list = (items || []).map(rssCard).join("");
-  return `
-    <div class="rss" data-rss>
-      <div class="rss-controls" style="margin-bottom:8px">
-        <button class="btn sm rss-refresh">Refresh</button>
+  if (!items || !items.length) {
+    return `
+      <div class="rss" data-rss>
+        <div class="rss-controls">
+          <button class="btn sm rss-refresh">Refresh</button>
+        </div>
+        <div class="muted">Loading…</div>
       </div>
-      <div class="rss-list" style="display:grid;gap:8px">${list}</div>
+    `;
+  }
+  const list = items.map(i => `
+    <div class="rss-item">
+      <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
+      <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
     </div>
-  `;
-}
-function rssLoadingMarkup() {
+  `).join("");
   return `
     <div class="rss" data-rss>
-      <div class="rss-controls" style="margin-bottom:8px">
+      <div class="rss-controls">
         <button class="btn sm rss-refresh">Refresh</button>
       </div>
-      <div class="muted">Loading…</div>
+      ${list}
     </div>
   `;
 }
 function rssErrorMarkup() {
   return `
     <div class="rss" data-rss>
-      <div class="rss-controls" style="margin-bottom:8px">
+      <div class="rss-controls">
         <button class="btn sm rss-refresh">Refresh</button>
       </div>
       <div class="muted">Couldn’t load news right now. Try Refresh in a moment.</div>
     </div>
   `;
 }
-async function loadRssInto(card, feeds, attempt=1) {
+function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
-  const rssUrl = `/api/rss?url=${encodeURIComponent(feeds[0])}`;
-  try {
-    const r = await fetch(rssUrl);
-    const data = await r.json();
-    const rawItems = (data.items||[]).slice(0,12);
-    // Enrich with AI summaries/images (graceful fallback)
-    let enriched = rawItems;
-    try {
-      const s = await fetch('/api/ai/summarize', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ items: rawItems })
-      });
-      if (s.ok) {
-        const sj = await s.json();
-        if (Array.isArray(sj.items) && sj.items.length) enriched = sj.items;
-      }
-    } catch {}
-    content.innerHTML = rssMarkup(enriched);
-  } catch (e) {
+  const url = `/api/rss?url=${encodeURIComponent(feeds[0])}`;
+  fetch(url).then(r=>r.json()).then(data=>{
+    const items = (data.items||[]).slice(0,10);
+    content.innerHTML = rssMarkup(items);
+  }).catch(()=>{
     if (attempt < 2) {
       setTimeout(()=>loadRssInto(card, feeds, attempt+1), 1000);
     } else {
       content.innerHTML = rssErrorMarkup();
     }
-  }
+  });
 }
 
 /* -----------------------------
@@ -273,6 +243,7 @@ function tickerMarkup(symbols) {
   return `<div class="ticker" data-symbols="${symbols.join(",")}">${rows}</div>`;
 }
 function loadQuotesInto(card, symbols) {
+  const content = card.querySelector(".content");
   const url = `/api/quote?symbols=${encodeURIComponent(symbols.join(','))}`;
   fetch(url).then(r=>r.json()).then(data=>{
     const map = {};
@@ -295,7 +266,6 @@ function loadQuotesInto(card, symbols) {
       row.classList.toggle("down", delta <  0);
     });
   }).catch(()=>{
-    const content = card.querySelector(".content");
     if (content && !content.querySelector(".ticker")) {
       content.innerHTML = `<div class="muted">Live prices unavailable right now.</div>`;
     }
@@ -337,7 +307,7 @@ function gallerySeed() {
 }
 function defaultSections() {
   return [
-    { id: uid(), type:"rss",      title:"Daily Brief", meta:{ feeds: RSS_PRESETS.uk }, content: rssLoadingMarkup() },
+    { id: uid(), type:"rss",      title:"Daily Brief", meta:{ feeds: RSS_PRESETS.uk }, content: rssMarkup([]) },
     { id: uid(), type:"web",      title:"BBC News",    meta:{url:"https://www.bbc.com", mode:"preview"}, content: webTileMarkup("https://www.bbc.com","preview") },
     { id: uid(), type:"youtube",  title:"YouTube",     meta:{ playlist:[...YT_DEFAULTS], current:"M7lc1UVf-VE" }, content: ytPlaylistMarkup(YT_DEFAULTS, "M7lc1UVf-VE") },
     { id: uid(), type:"stocks",   title:"Markets",     meta:{ symbols:["AAPL","MSFT","BTC-USD"] }, content: tickerMarkup(["AAPL","MSFT","BTC-USD"]) },
@@ -424,7 +394,7 @@ function render() {
   });
 
   initDynamicTiles();
-  initLiveFeeds();
+  initLiveFeeds();   // load live RSS + quotes
 }
 
 /* -----------------------------
@@ -469,7 +439,7 @@ function render() {
     render();
   });
 
-  // Settings
+  // Settings (opens a modal per tile type)
   grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".settingsBtn");
     if (!btn) return;
@@ -477,6 +447,7 @@ function render() {
     const s = sections.find(x => x.id === id);
     if (!s) return;
 
+    // Per-type fields (+ presets)
     let fields = "";
     if (s.type === "web") {
       const url = s.meta?.url || "";
@@ -556,6 +527,7 @@ function render() {
     `;
     __openModal(html);
 
+    // Preset apply hooks (if present)
     $("#apply_symbols_preset")?.addEventListener("click", ()=>{
       const key = $("#set_symbols_preset").value;
       if (!key) return;
@@ -569,6 +541,7 @@ function render() {
       $("#set_feeds").value = arr.join(",");
     });
 
+    // Save handler
     $("#settingsSaveBtn")?.addEventListener("click", ()=>{
       if (s.type === "web") {
         const url = $("#set_url")?.value?.trim() || s.meta?.url || "";
@@ -590,14 +563,14 @@ function render() {
         const feeds = ($("#set_feeds")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
         const list = feeds.length? feeds : (s.meta?.feeds || RSS_PRESETS.uk);
         s.meta = {...(s.meta||{}), feeds: list};
-        s.content = rssLoadingMarkup();
+        s.content = rssMarkup([]); // loading
       }
       localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
       render();
     }, { once:true });
   });
 
-  // Backdrop close (fullscreen)
+  // Backdrop close
   fsBackdrop.addEventListener("click", ()=>{
     const open = document.querySelector(".card.card-full");
     if (!open) return;
@@ -810,7 +783,7 @@ function flashGoal(card, matchIdx, scoreText){
 }
 
 /* -----------------------------
-   Add Tile (AI router first, fallback to heuristics)
+   Add Tile
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
@@ -819,48 +792,22 @@ addBtn.addEventListener("click", () => {
   tileMenu.classList.toggle("hidden");
   if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
 });
-tileSearch.addEventListener("keydown", async (e)=>{
+tileSearch.addEventListener("keydown", (e)=>{
   if (e.key === "Enter") {
     const val = tileSearch.value.trim();
     if (!val) return;
 
     let newTile = null;
 
-    // 1) Try AI router
-    try {
-      const resp = await fetch('/api/ai/route', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ query: val })
-      });
-      if (resp.ok) {
-        const j = await resp.json();
-        const t = (j.type || "").toLowerCase();
-        const p = j.params || {};
-        const title = j.title || val.replace(/\b\w/g, m=>m.toUpperCase());
+    // Quick commands for RSS presets
+    const cmdNews = val.match(/^news\s+(world|tech|finance|uk)$/i);
+    if (cmdNews) {
+      const key = cmdNews[1].toLowerCase();
+      const feeds = RSS_PRESETS[key] || RSS_PRESETS.uk;
+      newTile = { id: uid(), type:"rss", title:`Daily Brief (${key})`, meta:{ feeds }, content: rssMarkup([]) };
+    }
 
-        if (t === "news" || t === "rss") {
-          const feeds = p.topic ? guessRssByTopic(p.topic) : (RSS_PRESETS.uk);
-          newTile = { id: uid(), type:"rss", title: title || "Daily Brief", meta:{ feeds }, content: rssLoadingMarkup() };
-        } else if (t === "youtube") {
-          const playlist = [...YT_DEFAULTS];
-          newTile = { id: uid(), type:"youtube", title: title || "YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
-        } else if (t === "stocks") {
-          const symbols = (p.symbols && p.symbols.length) ? p.symbols : ["AAPL","MSFT","BTC-USD"];
-          newTile = { id: uid(), type:"stocks", title: title || "Markets", meta:{symbols}, content: tickerMarkup(symbols) };
-        } else if (t === "spotify" && p.url) {
-          const url = p.url;
-          newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
-        } else if (t === "web" && p.url) {
-          const url = p.url;
-          newTile = { id: uid(), type:"web", title: new URL(url).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
-        } else if (t === "discover") {
-          newTile = { id: uid(), type:"interest", title, content: `Auto-created tile for <strong>${title}</strong>` };
-        }
-      }
-    } catch {}
-
-    // 2) Fallback: your original heuristics (unchanged)
+    // YouTube by URL or keyword "youtube ..."
     if (!newTile) {
       const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
       if (ytUrl) {
@@ -871,39 +818,61 @@ tileSearch.addEventListener("keydown", async (e)=>{
         const playlist = [...YT_DEFAULTS];
         newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
       }
+    }
 
-      if (!newTile && /spotify/i.test(val)) {
-        const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
-        newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
-      }
+    // Spotify
+    if (!newTile && /spotify/i.test(val)) {
+      const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
+      newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
+    }
 
-      if (!newTile && /stocks?|markets?/i.test(val)) {
-        const symbols = ["AAPL","MSFT","BTC-USD"];
-        newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
-      }
+    // Stocks
+    if (!newTile && /stocks?|markets?/i.test(val)) {
+      const symbols = ["AAPL","MSFT","BTC-USD"];
+      newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
+    }
 
-      if (!newTile && /weather/i.test(val)) {
-        const html = `
-          <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
-          <div class="row" style="margin-top:8px">
-            <div>🌤️</div><div class="muted">Partly cloudy</div><div>18°C</div>
-          </div>`;
-        newTile = { id: uid(), type:"weather", title:"Weather", content: html };
-      }
+    // Weather (stub)
+    if (!newTile && /weather/i.test(val)) {
+      const html = `
+        <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
+        <div class="row" style="margin-top:8px">
+          <div>🌤️</div><div class="muted">Partly cloudy</div><div>18°C</div>
+        </div>`;
+      newTile = { id: uid(), type:"weather", title:"Weather", content: html };
+    }
 
-      if (!newTile && /(football|soccer|scores|prem|premier)/i.test(val)) {
-        newTile = { id: uid(), type:"football", title:"Football", content: footballMarkupSeed() };
-      }
+    // Football
+    if (!newTile && /(football|soccer|scores|prem|premier)/i.test(val)) {
+      newTile = { id: uid(), type:"football", title:"Football", content: footballMarkupSeed() };
+    }
 
-      const isUrl = /^https?:\/\//i.test(val);
-      if (!newTile && isUrl) {
-        const url = val;
-        newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
-      }
+    // URL -> Web embed (Preview default)
+    const isUrl = /^https?:\/\//i.test(val);
+    if (!newTile && isUrl) {
+      const url = val;
+      newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+    }
 
-      if (!newTile) {
-        newTile = { id: uid(), type:"interest", title: val.replace(/\b\w/g, m=>m.toUpperCase()), content: `Auto-created tile for <strong>${val}</strong>` };
+    // ------- NEW: Any phrase -> News via Google News RSS -------
+    if (!newTile) {
+      const topic = val.replace(/[^\w\s-]/g,' ').trim();
+      if (topic.length) {
+        const gnews = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
+        newTile = {
+          id: uid(),
+          type: "rss",
+          title: topic.replace(/\b\w/g, m => m.toUpperCase()),
+          meta: { feeds: [gnews] },
+          content: rssMarkup([])  // loading -> /api/rss fills in
+        };
       }
+    }
+    // -----------------------------------------------------------
+
+    // Fallback -> Interest
+    if (!newTile) {
+      newTile = { id: uid(), type:"interest", title: val.replace(/\b\w/g, m=>m.toUpperCase()), content: `Auto-created tile for <strong>${val}</strong>` };
     }
 
     sections.push(newTile);
@@ -915,13 +884,6 @@ tileSearch.addEventListener("keydown", async (e)=>{
     tileMenu.classList.add("hidden");
   }
 });
-function guessRssByTopic(topic=""){
-  const t = topic.toLowerCase();
-  if (/tech|ai|software|gadgets/.test(t)) return RSS_PRESETS.tech;
-  if (/finance|market|economy|stock|crypto/.test(t)) return RSS_PRESETS.finance;
-  if (/uk|britain|england|london/.test(t)) return RSS_PRESETS.uk;
-  return RSS_PRESETS.world;
-}
 
 /* -----------------------------
    Assistant Toggle & Chat
