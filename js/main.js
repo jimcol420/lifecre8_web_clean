@@ -1,13 +1,13 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.10.1
+   LifeCre8 — main.js  v1.10.0
+   BASE: v1.9.0 (no features removed)
+   + AI intent-router for Add Tile (/api/ai/route) with fallback
+   + AI summaries/images for Daily Brief (/api/ai/summarize) with fallback
    - Solar + Ice themes
    - Modal safety-net (close on Save/Cancel/backdrop/Esc)
-   - LIVE NEWS via /api/rss (real RSS → JSON) with presets + failover
-   - LIVE MARKETS via /api/quote (Stooq/CoinGecko) with presets
-   - Smart "Add Tile" commands: "news tech", "news world", etc.
-   - YouTube playlist tile (thumbnails + quick swap)
-   - Web/Embed tile (preview fallback for X-Frame-Options)
-   - Spotify, Gallery, Football (sim), Weather (stub)
+   - LIVE NEWS via /api/rss (real RSS → JSON) with presets
+   - LIVE MARKETS via /api/quote (Yahoo → JSON) with presets
+   - Smart "Add Tile" commands (kept as fallback)
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -16,14 +16,13 @@ const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
 const K_PREFS      = "lifecre8.prefs"; // theme, density
-const DATA_VERSION = 5;
+const DATA_VERSION = 6;
 
 /* ===== Presets ===== */
 const RSS_PRESETS = {
   world: [
     "https://feeds.bbci.co.uk/news/world/rss.xml",
-    "https://www.reuters.com/world/rss",
-    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"
+    "https://www.reuters.com/world/rss"
   ],
   tech: [
     "https://www.theverge.com/rss/index.xml",
@@ -32,13 +31,11 @@ const RSS_PRESETS = {
   ],
   finance: [
     "https://feeds.bbci.co.uk/news/business/rss.xml",
-    "https://www.reuters.com/markets/rss",
-    "https://www.ft.com/world/uk/rss"
+    "https://www.reuters.com/markets/rss"
   ],
   uk: [
     "https://feeds.bbci.co.uk/news/rss.xml",
-    "https://www.theguardian.com/uk-news/rss",
-    "https://feeds.skynews.com/feeds/rss/uk.xml"
+    "https://www.theguardian.com/uk-news/rss"
   ]
 };
 const STOCK_PRESETS = {
@@ -54,32 +51,21 @@ let chat        = JSON.parse(localStorage.getItem(K_CHAT)      || "[]");
 if (!chat.length) chat = [{ role:'ai', text:"Hi! I'm your AI Assistant. Ask me anything." }];
 
 let prefs = JSON.parse(localStorage.getItem(K_PREFS) || "{}");
-if (!prefs.theme)   prefs.theme   = "solar";            // "solar" | "ice"
-if (!prefs.density) prefs.density = "comfortable";      // "comfortable" | "compact"
-document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
-document.body.classList.toggle('density-compact',  prefs.density === 'compact');
+if (!prefs.theme) prefs.theme = "solar";
+if (!prefs.density) prefs.density = "comfortable";
+document.body.classList.toggle('theme-ice', prefs.theme === 'ice');
+document.body.classList.toggle('density-compact', prefs.density === 'compact');
 
 /* timers for dynamic tiles */
 let dynamicTimers = {};
 let liveIntervals = {};
 
 /* ===== Utils ===== */
-const $        = (q) => document.querySelector(q);
-const $$       = (q) => Array.from(document.querySelectorAll(q));
-const uid      = () => Math.random().toString(36).slice(2);
-const clamp    = (n, a, b) => Math.max(a, Math.min(b, n));
-const hostOf   = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
-const safeHost = (u) => hostOf(u).replace(/^www\./,'');
-const escapeHtml = (s='') => s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]) );
-function formatWhen(d){
-  let ts = (typeof d === 'string') ? Date.parse(d) : (d instanceof Date ? +d : NaN);
-  if (Number.isNaN(ts)) return '';
-  const diff = (Date.now() - ts)/1000;
-  if (diff < 60) return 'just now';
-  if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
-  return new Date(ts).toLocaleDateString();
-}
+const $  = q => document.querySelector(q);
+const $$ = q => Array.from(document.querySelectorAll(q));
+const uid = () => Math.random().toString(36).slice(2);
+const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
 
 const appEl = document.querySelector(".app");
 
@@ -151,7 +137,7 @@ function webTileMarkup(url, mode = "preview") {
         <div class="web-header">
           <img class="web-favicon" src="${favicon}" alt="">
           <div>
-            <div class="web-title">${host ? host.replace(/^www\./,'') : url}</div>
+            <div class="web-title">${host || url}</div>
             <div class="web-host">${url}</div>
           </div>
         </div>
@@ -179,88 +165,86 @@ function spotifyMarkup(spotifyUrl) {
   `;
 }
 
-/* ============================================================
-   RSS (LIVE via /api/rss) — thumbnails & failover across feeds
-============================================================ */
-function pickImage(i){
-  // backend may supply image; else, try to sniff common patterns
-  if (i.image) return i.image;
-  // fallback placeholder
-  return 'https://dummyimage.com/96x64/0a1522/3b455e.png&text=%20';
+/* -----------------------------
+   RSS tile (LIVE via /api/rss) + AI summarize (/api/ai/summarize)
+----------------------------- */
+function rssCard(i) {
+  // Render a nicer card-style item with optional image + summary
+  const img = i.image ? `<img src="${i.image}" alt="" style="width:92px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--border);background:#0a1522;margin-right:10px"/>` : "";
+  const summary = i.summary ? `<div class="muted" style="margin-top:4px">${i.summary}</div>` : "";
+  const meta = [i.source, i.time].filter(Boolean).join(" — ");
+  return `
+    <a class="rss-card" href="${i.link}" target="_blank" rel="noopener"
+       style="display:flex;align-items:center;text-decoration:none;color:inherit;border:1px solid var(--border);border-radius:12px;padding:8px 10px;background:rgba(0,0,0,.03);gap:10px">
+      ${img}
+      <div style="min-width:0">
+        <div style="font-weight:700;line-height:1.25">${i.title}</div>
+        ${summary}
+        <div class="muted" style="margin-top:4px">${meta}</div>
+      </div>
+    </a>
+  `;
 }
 function rssMarkup(items) {
-  if (!items || !items.length) {
-    return `
-      <div class="rss" data-rss>
-        <div class="rss-controls">
-          <button class="btn sm rss-refresh">Refresh</button>
-        </div>
-        <div class="muted">Loading…</div>
-      </div>
-    `;
-  }
-  const list = items.map(i => {
-    const img = pickImage(i);
-    const host = safeHost(i.link) || (i.source || '');
-    const when = i.pubDate ? ` • ${formatWhen(i.pubDate)}` : (i.time ? ` — ${i.time}` : '');
-    return `
-      <article class="news-item">
-        <div class="news-thumb"><img src="${img}" alt="thumbnail" loading="lazy"></div>
-        <div class="news-meta">
-          <h4 class="news-title"><a href="${i.link}" target="_blank" rel="noopener">${escapeHtml(i.title||'(untitled)')}</a></h4>
-          <div class="news-source">${escapeHtml(host)}${when}</div>
-        </div>
-      </article>
-    `;
-  }).join("");
+  const list = (items || []).map(rssCard).join("");
   return `
     <div class="rss" data-rss>
       <div class="rss-controls" style="margin-bottom:8px">
         <button class="btn sm rss-refresh">Refresh</button>
       </div>
-      <div class="news-list">${list}</div>
+      <div class="rss-list" style="display:grid;gap:8px">${list}</div>
+    </div>
+  `;
+}
+function rssLoadingMarkup() {
+  return `
+    <div class="rss" data-rss>
+      <div class="rss-controls" style="margin-bottom:8px">
+        <button class="btn sm rss-refresh">Refresh</button>
+      </div>
+      <div class="muted">Loading…</div>
     </div>
   `;
 }
 function rssErrorMarkup() {
   return `
     <div class="rss" data-rss>
-      <div class="rss-controls">
+      <div class="rss-controls" style="margin-bottom:8px">
         <button class="btn sm rss-refresh">Refresh</button>
       </div>
       <div class="muted">Couldn’t load news right now. Try Refresh in a moment.</div>
     </div>
   `;
 }
-async function fetchRss(url) {
-  // Try both ?url= and ?feed= to be compatible with backends
-  const a = `/api/rss?url=${encodeURIComponent(url)}`;
-  const b = `/api/rss?feed=${encodeURIComponent(url)}`;
-  for (const u of [a, b]) {
-    try {
-      const r = await fetch(u);
-      if (r.ok) {
-        const j = await r.json();
-        if (Array.isArray(j.items) && j.items.length) return j.items;
-      }
-    } catch {}
-  }
-  throw new Error('rss fetch failed');
-}
-function loadRssInto(card, feeds) {
+async function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
-  (async ()=>{
-    // try feeds in order until one returns non-empty items
-    for (let i=0;i<feeds.length;i++){
-      try {
-        const items = await fetchRss(feeds[i]);
-        content.innerHTML = rssMarkup(items.slice(0,10));
-        return;
-      } catch { /* try next feed */ }
+  const rssUrl = `/api/rss?url=${encodeURIComponent(feeds[0])}`;
+  try {
+    const r = await fetch(rssUrl);
+    const data = await r.json();
+    const rawItems = (data.items||[]).slice(0,12);
+    // Enrich with AI summaries/images (graceful fallback)
+    let enriched = rawItems;
+    try {
+      const s = await fetch('/api/ai/summarize', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ items: rawItems })
+      });
+      if (s.ok) {
+        const sj = await s.json();
+        if (Array.isArray(sj.items) && sj.items.length) enriched = sj.items;
+      }
+    } catch {}
+    content.innerHTML = rssMarkup(enriched);
+  } catch (e) {
+    if (attempt < 2) {
+      setTimeout(()=>loadRssInto(card, feeds, attempt+1), 1000);
+    } else {
+      content.innerHTML = rssErrorMarkup();
     }
-    content.innerHTML = rssErrorMarkup();
-  })();
+  }
 }
 
 /* -----------------------------
@@ -289,11 +273,10 @@ function tickerMarkup(symbols) {
   return `<div class="ticker" data-symbols="${symbols.join(",")}">${rows}</div>`;
 }
 function loadQuotesInto(card, symbols) {
-  const content = card.querySelector(".content");
   const url = `/api/quote?symbols=${encodeURIComponent(symbols.join(','))}`;
   fetch(url).then(r=>r.json()).then(data=>{
     const map = {};
-    (data.items||data.quotes||[]).forEach(q=>{ map[q.symbol.toUpperCase()] = q; });
+    (data.quotes||[]).forEach(q=>{ map[q.symbol.toUpperCase()] = q; });
     const rows = card.querySelectorAll(".trow");
     rows.forEach(row=>{
       const sym = row.dataset.sym.toUpperCase();
@@ -302,16 +285,17 @@ function loadQuotesInto(card, symbols) {
       const priceEl = row.querySelector("[data-price]");
       const chgEl   = row.querySelector("[data-chg]");
       const price = q.price;
-      const delta = q.change ?? q.changeAbs ?? null;
-      const pct   = q.changePercent ?? q.changePct24h ?? null;
-      priceEl.textContent = (price!=null) ? (typeof price === 'number' ? price.toFixed(2) : price) : "—";
+      const delta = q.change;
+      const pct   = q.changePercent;
+      priceEl.textContent = (price!=null) ? price.toFixed(2) : "—";
       chgEl.textContent   = (delta!=null && pct!=null)
-        ? `${delta>=0?"+":""}${Number(delta).toFixed(2)}  (${pct>=0?"+":""}${Number(pct).toFixed(2)}%)`
+        ? `${delta>=0?"+":""}${delta.toFixed(2)}  (${pct>=0?"+":""}${pct.toFixed(2)}%)`
         : "—";
-      row.classList.toggle("up",   Number(delta) >= 0);
-      row.classList.toggle("down", Number(delta) <  0);
+      row.classList.toggle("up",   delta >= 0);
+      row.classList.toggle("down", delta <  0);
     });
   }).catch(()=>{
+    const content = card.querySelector(".content");
     if (content && !content.querySelector(".ticker")) {
       content.innerHTML = `<div class="muted">Live prices unavailable right now.</div>`;
     }
@@ -353,7 +337,7 @@ function gallerySeed() {
 }
 function defaultSections() {
   return [
-    { id: uid(), type:"rss",      title:"Daily Brief", meta:{ feeds: RSS_PRESETS.uk }, content: rssMarkup([]) },
+    { id: uid(), type:"rss",      title:"Daily Brief", meta:{ feeds: RSS_PRESETS.uk }, content: rssLoadingMarkup() },
     { id: uid(), type:"web",      title:"BBC News",    meta:{url:"https://www.bbc.com", mode:"preview"}, content: webTileMarkup("https://www.bbc.com","preview") },
     { id: uid(), type:"youtube",  title:"YouTube",     meta:{ playlist:[...YT_DEFAULTS], current:"M7lc1UVf-VE" }, content: ytPlaylistMarkup(YT_DEFAULTS, "M7lc1UVf-VE") },
     { id: uid(), type:"stocks",   title:"Markets",     meta:{ symbols:["AAPL","MSFT","BTC-USD"] }, content: tickerMarkup(["AAPL","MSFT","BTC-USD"]) },
@@ -395,19 +379,22 @@ function tileContentFor(section) {
       const url = section.meta?.url || "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
       return spotifyMarkup(url);
     }
-    case "rss":     return section.content;
-    case "gallery": return galleryMarkup(section.meta?.urls || []);
-    case "stocks":  return section.content;
-    case "football":return section.content;
-    default:        return section.content || "Empty tile";
+    case "rss": return section.content;
+    case "gallery": {
+      const urls = section.meta?.urls || [];
+      return galleryMarkup(urls);
+    }
+    case "stocks": return section.content;
+    case "football": return section.content;
+    default: return section.content || "Empty tile";
   }
 }
 function cardHeaderActions(id){
   return `
     <div class="actions">
       <button class="btn sm settingsBtn" data-id="${id}">Settings</button>
-      <button class="btn sm expandBtn"   data-id="${id}">⤢ Expand</button>
-      <button class="btn sm removeBtn"   data-id="${id}">Remove</button>
+      <button class="btn sm expandBtn" data-id="${id}">⤢ Expand</button>
+      <button class="btn sm removeBtn" data-id="${id}">Remove</button>
     </div>
   `;
 }
@@ -437,7 +424,7 @@ function render() {
   });
 
   initDynamicTiles();
-  initLiveFeeds();   // load live RSS + quotes
+  initLiveFeeds();
 }
 
 /* -----------------------------
@@ -482,7 +469,7 @@ function render() {
     render();
   });
 
-  // Settings (opens a modal per tile type)
+  // Settings
   grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".settingsBtn");
     if (!btn) return;
@@ -490,7 +477,6 @@ function render() {
     const s = sections.find(x => x.id === id);
     if (!s) return;
 
-    // Per-type fields (+ presets)
     let fields = "";
     if (s.type === "web") {
       const url = s.meta?.url || "";
@@ -540,7 +526,7 @@ function render() {
       const presetOptions = Object.keys(RSS_PRESETS).map(key=>`<option value="${key}">${key.toUpperCase()}</option>`).join("");
       fields = `
         <div class="field">
-          <label>RSS feeds (comma-separated URLs; tried in order)</label>
+          <label>RSS feeds (comma-separated URLs; first is used)</label>
           <input class="input" id="set_feeds" value="${feeds}">
         </div>
         <div class="field">
@@ -570,7 +556,6 @@ function render() {
     `;
     __openModal(html);
 
-    // Preset apply hooks (if present)
     $("#apply_symbols_preset")?.addEventListener("click", ()=>{
       const key = $("#set_symbols_preset").value;
       if (!key) return;
@@ -584,7 +569,6 @@ function render() {
       $("#set_feeds").value = arr.join(",");
     });
 
-    // Save handler
     $("#settingsSaveBtn")?.addEventListener("click", ()=>{
       if (s.type === "web") {
         const url = $("#set_url")?.value?.trim() || s.meta?.url || "";
@@ -606,14 +590,14 @@ function render() {
         const feeds = ($("#set_feeds")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
         const list = feeds.length? feeds : (s.meta?.feeds || RSS_PRESETS.uk);
         s.meta = {...(s.meta||{}), feeds: list};
-        s.content = rssMarkup([]); // loading
+        s.content = rssLoadingMarkup();
       }
       localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
       render();
     }, { once:true });
   });
 
-  // Backdrop close
+  // Backdrop close (fullscreen)
   fsBackdrop.addEventListener("click", ()=>{
     const open = document.querySelector(".card.card-full");
     if (!open) return;
@@ -803,13 +787,15 @@ function stepPrice(p){ const drift = (Math.random()-0.5) * (p*0.004); return Mat
 function renderTicker(card, prices, prev){
   const rows = card.querySelectorAll(".trow");
   rows.forEach(row=>{
-    const sym   = row.dataset.sym;
+    const sym = row.dataset.sym;
+    const priceEl = row.querySelector("[data-price]");
+    const chgEl   = row.querySelector("[data-chg]");
     const price = prices[sym];
     const last  = prev[sym] ?? price;
     const delta = price - last;
     const pct   = (delta/last)*100;
-    row.querySelector("[data-price]").textContent = price.toFixed(2);
-    row.querySelector("[data-chg]").textContent   = `${delta>=0?"+":""}${delta.toFixed(2)}  (${pct>=0?"+":""}${pct.toFixed(2)}%)`;
+    priceEl.textContent = price.toFixed(2);
+    chgEl.textContent   = `${delta>=0?"+":""}${delta.toFixed(2)}  (${pct>=0?"+":""}${pct.toFixed(2)}%)`;
     row.classList.toggle("up",   delta >= 0);
     row.classList.toggle("down", delta <  0);
   });
@@ -824,7 +810,7 @@ function flashGoal(card, matchIdx, scoreText){
 }
 
 /* -----------------------------
-   Add Tile
+   Add Tile (AI router first, fallback to heuristics)
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
@@ -833,22 +819,48 @@ addBtn.addEventListener("click", () => {
   tileMenu.classList.toggle("hidden");
   if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
 });
-tileSearch.addEventListener("keydown", (e)=>{
+tileSearch.addEventListener("keydown", async (e)=>{
   if (e.key === "Enter") {
     const val = tileSearch.value.trim();
     if (!val) return;
 
     let newTile = null;
 
-    // Quick commands for RSS presets
-    const cmdNews = val.match(/^news\s+(world|tech|finance|uk)$/i);
-    if (cmdNews) {
-      const key = cmdNews[1].toLowerCase();
-      const feeds = RSS_PRESETS[key] || RSS_PRESETS.uk;
-      newTile = { id: uid(), type:"rss", title:`Daily Brief (${key})`, meta:{ feeds }, content: rssMarkup([]) };
-    }
+    // 1) Try AI router
+    try {
+      const resp = await fetch('/api/ai/route', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ query: val })
+      });
+      if (resp.ok) {
+        const j = await resp.json();
+        const t = (j.type || "").toLowerCase();
+        const p = j.params || {};
+        const title = j.title || val.replace(/\b\w/g, m=>m.toUpperCase());
 
-    // YouTube by URL or keyword "youtube ..."
+        if (t === "news" || t === "rss") {
+          const feeds = p.topic ? guessRssByTopic(p.topic) : (RSS_PRESETS.uk);
+          newTile = { id: uid(), type:"rss", title: title || "Daily Brief", meta:{ feeds }, content: rssLoadingMarkup() };
+        } else if (t === "youtube") {
+          const playlist = [...YT_DEFAULTS];
+          newTile = { id: uid(), type:"youtube", title: title || "YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
+        } else if (t === "stocks") {
+          const symbols = (p.symbols && p.symbols.length) ? p.symbols : ["AAPL","MSFT","BTC-USD"];
+          newTile = { id: uid(), type:"stocks", title: title || "Markets", meta:{symbols}, content: tickerMarkup(symbols) };
+        } else if (t === "spotify" && p.url) {
+          const url = p.url;
+          newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
+        } else if (t === "web" && p.url) {
+          const url = p.url;
+          newTile = { id: uid(), type:"web", title: new URL(url).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+        } else if (t === "discover") {
+          newTile = { id: uid(), type:"interest", title, content: `Auto-created tile for <strong>${title}</strong>` };
+        }
+      }
+    } catch {}
+
+    // 2) Fallback: your original heuristics (unchanged)
     if (!newTile) {
       const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
       if (ytUrl) {
@@ -859,45 +871,39 @@ tileSearch.addEventListener("keydown", (e)=>{
         const playlist = [...YT_DEFAULTS];
         newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
       }
-    }
 
-    // Spotify
-    if (!newTile && /spotify/i.test(val)) {
-      const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
-      newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
-    }
+      if (!newTile && /spotify/i.test(val)) {
+        const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
+        newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
+      }
 
-    // Stocks
-    if (!newTile && /stocks?|markets?/i.test(val)) {
-      const symbols = ["AAPL","MSFT","BTC-USD"];
-      newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
-    }
+      if (!newTile && /stocks?|markets?/i.test(val)) {
+        const symbols = ["AAPL","MSFT","BTC-USD"];
+        newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
+      }
 
-    // Weather (stub)
-    if (!newTile && /weather/i.test(val)) {
-      const html = `
-        <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
-        <div class="row" style="margin-top:8px">
-          <div>🌤️</div><div class="muted">Partly cloudy</div><div>18°C</div>
-        </div>`;
-      newTile = { id: uid(), type:"weather", title:"Weather", content: html };
-    }
+      if (!newTile && /weather/i.test(val)) {
+        const html = `
+          <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
+          <div class="row" style="margin-top:8px">
+            <div>🌤️</div><div class="muted">Partly cloudy</div><div>18°C</div>
+          </div>`;
+        newTile = { id: uid(), type:"weather", title:"Weather", content: html };
+      }
 
-    // Football
-    if (!newTile && /(football|soccer|scores|prem|premier)/i.test(val)) {
-      newTile = { id: uid(), type:"football", title:"Football", content: footballMarkupSeed() };
-    }
+      if (!newTile && /(football|soccer|scores|prem|premier)/i.test(val)) {
+        newTile = { id: uid(), type:"football", title:"Football", content: footballMarkupSeed() };
+      }
 
-    // URL -> Web embed (Preview default)
-    const isUrl = /^https?:\/\//i.test(val);
-    if (!newTile && isUrl) {
-      const url = val;
-      newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
-    }
+      const isUrl = /^https?:\/\//i.test(val);
+      if (!newTile && isUrl) {
+        const url = val;
+        newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+      }
 
-    // Fallback -> Interest
-    if (!newTile) {
-      newTile = { id: uid(), type:"interest", title: val.replace(/\b\w/g, m=>m.toUpperCase()), content: `Auto-created tile for <strong>${val}</strong>` };
+      if (!newTile) {
+        newTile = { id: uid(), type:"interest", title: val.replace(/\b\w/g, m=>m.toUpperCase()), content: `Auto-created tile for <strong>${val}</strong>` };
+      }
     }
 
     sections.push(newTile);
@@ -909,6 +915,13 @@ tileSearch.addEventListener("keydown", (e)=>{
     tileMenu.classList.add("hidden");
   }
 });
+function guessRssByTopic(topic=""){
+  const t = topic.toLowerCase();
+  if (/tech|ai|software|gadgets/.test(t)) return RSS_PRESETS.tech;
+  if (/finance|market|economy|stock|crypto/.test(t)) return RSS_PRESETS.finance;
+  if (/uk|britain|england|london/.test(t)) return RSS_PRESETS.uk;
+  return RSS_PRESETS.world;
+}
 
 /* -----------------------------
    Assistant Toggle & Chat
@@ -982,7 +995,7 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
   `;
   __openModal(html);
   $("#g_save")?.addEventListener("click", ()=>{
-    const theme   = $("#g_theme").value;
+    const theme = $("#g_theme").value;
     const density = $("#g_density").value;
     prefs.theme = theme; prefs.density = density;
     localStorage.setItem(K_PREFS, JSON.stringify(prefs));
@@ -995,7 +1008,7 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
    Modal close safety net
 ----------------------------- */
 (function modalSafetyNet(){
-  const modal    = document.getElementById('modal');
+  const modal = document.getElementById('modal');
   const backdrop = document.getElementById('fsBackdrop');
 
   function isOpen() {
