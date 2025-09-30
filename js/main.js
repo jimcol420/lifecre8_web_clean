@@ -1,10 +1,13 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.10.0
+   LifeCre8 — main.js  v1.10.1
    - Solar + Ice themes
    - Modal safety-net (close on Save/Cancel/backdrop/Esc)
-   - LIVE NEWS via /api/rss (real RSS → JSON) with presets + thumbnails
-   - LIVE MARKETS via /api/quote (Yahoo Finance → JSON) with presets
+   - LIVE NEWS via /api/rss (real RSS → JSON) with presets + failover
+   - LIVE MARKETS via /api/quote (Stooq/CoinGecko) with presets
    - Smart "Add Tile" commands: "news tech", "news world", etc.
+   - YouTube playlist tile (thumbnails + quick swap)
+   - Web/Embed tile (preview fallback for X-Frame-Options)
+   - Spotify, Gallery, Football (sim), Weather (stub)
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -13,13 +16,14 @@ const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
 const K_PREFS      = "lifecre8.prefs"; // theme, density
-const DATA_VERSION = 6;
+const DATA_VERSION = 5;
 
 /* ===== Presets ===== */
 const RSS_PRESETS = {
   world: [
     "https://feeds.bbci.co.uk/news/world/rss.xml",
-    "https://www.reuters.com/world/rss"
+    "https://www.reuters.com/world/rss",
+    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml"
   ],
   tech: [
     "https://www.theverge.com/rss/index.xml",
@@ -28,11 +32,13 @@ const RSS_PRESETS = {
   ],
   finance: [
     "https://feeds.bbci.co.uk/news/business/rss.xml",
-    "https://www.reuters.com/markets/rss"
+    "https://www.reuters.com/markets/rss",
+    "https://www.ft.com/world/uk/rss"
   ],
   uk: [
     "https://feeds.bbci.co.uk/news/rss.xml",
-    "https://www.theguardian.com/uk-news/rss"
+    "https://www.theguardian.com/uk-news/rss",
+    "https://feeds.skynews.com/feeds/rss/uk.xml"
   ]
 };
 const STOCK_PRESETS = {
@@ -48,21 +54,32 @@ let chat        = JSON.parse(localStorage.getItem(K_CHAT)      || "[]");
 if (!chat.length) chat = [{ role:'ai', text:"Hi! I'm your AI Assistant. Ask me anything." }];
 
 let prefs = JSON.parse(localStorage.getItem(K_PREFS) || "{}");
-if (!prefs.theme) prefs.theme = "solar";      // "solar" | "ice"
-if (!prefs.density) prefs.density = "comfortable"; // "comfortable" | "compact"
-document.body.classList.toggle('theme-ice', prefs.theme === 'ice');
-document.body.classList.toggle('density-compact', prefs.density === 'compact');
+if (!prefs.theme)   prefs.theme   = "solar";            // "solar" | "ice"
+if (!prefs.density) prefs.density = "comfortable";      // "comfortable" | "compact"
+document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
+document.body.classList.toggle('density-compact',  prefs.density === 'compact');
 
 /* timers for dynamic tiles */
 let dynamicTimers = {};
 let liveIntervals = {};
 
 /* ===== Utils ===== */
-const $  = q => document.querySelector(q);
-const $$ = q => Array.from(document.querySelectorAll(q));
-const uid = () => Math.random().toString(36).slice(2);
-const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
-const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
+const $        = (q) => document.querySelector(q);
+const $$       = (q) => Array.from(document.querySelectorAll(q));
+const uid      = () => Math.random().toString(36).slice(2);
+const clamp    = (n, a, b) => Math.max(a, Math.min(b, n));
+const hostOf   = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
+const safeHost = (u) => hostOf(u).replace(/^www\./,'');
+const escapeHtml = (s='') => s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]) );
+function formatWhen(d){
+  let ts = (typeof d === 'string') ? Date.parse(d) : (d instanceof Date ? +d : NaN);
+  if (Number.isNaN(ts)) return '';
+  const diff = (Date.now() - ts)/1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff/60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff/3600)}h ago`;
+  return new Date(ts).toLocaleDateString();
+}
 
 const appEl = document.querySelector(".app");
 
@@ -134,7 +151,7 @@ function webTileMarkup(url, mode = "preview") {
         <div class="web-header">
           <img class="web-favicon" src="${favicon}" alt="">
           <div>
-            <div class="web-title">${host || url}</div>
+            <div class="web-title">${host ? host.replace(/^www\./,'') : url}</div>
             <div class="web-host">${url}</div>
           </div>
         </div>
@@ -162,9 +179,15 @@ function spotifyMarkup(spotifyUrl) {
   `;
 }
 
-/* -----------------------------
-   RSS (LIVE via /api/rss) — with thumbnails & nicer layout
------------------------------ */
+/* ============================================================
+   RSS (LIVE via /api/rss) — thumbnails & failover across feeds
+============================================================ */
+function pickImage(i){
+  // backend may supply image; else, try to sniff common patterns
+  if (i.image) return i.image;
+  // fallback placeholder
+  return 'https://dummyimage.com/96x64/0a1522/3b455e.png&text=%20';
+}
 function rssMarkup(items) {
   if (!items || !items.length) {
     return `
@@ -209,52 +232,35 @@ function rssErrorMarkup() {
     </div>
   `;
 }
-function loadRssInto(card, feeds, attempt=1) {
+async function fetchRss(url) {
+  // Try both ?url= and ?feed= to be compatible with backends
+  const a = `/api/rss?url=${encodeURIComponent(url)}`;
+  const b = `/api/rss?feed=${encodeURIComponent(url)}`;
+  for (const u of [a, b]) {
+    try {
+      const r = await fetch(u);
+      if (r.ok) {
+        const j = await r.json();
+        if (Array.isArray(j.items) && j.items.length) return j.items;
+      }
+    } catch {}
+  }
+  throw new Error('rss fetch failed');
+}
+function loadRssInto(card, feeds) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
-  const url = `/api/rss?url=${encodeURIComponent(feeds[0])}`;
-  fetch(url).then(r=>r.json()).then(data=>{
-    const items = (data.items||[]).slice(0,10);
-    content.innerHTML = rssMarkup(items);
-  }).catch(()=>{
-    if (attempt < 2) {
-      setTimeout(()=>loadRssInto(card, feeds, attempt+1), 1000);
-    } else {
-      content.innerHTML = rssErrorMarkup();
+  (async ()=>{
+    // try feeds in order until one returns non-empty items
+    for (let i=0;i<feeds.length;i++){
+      try {
+        const items = await fetchRss(feeds[i]);
+        content.innerHTML = rssMarkup(items.slice(0,10));
+        return;
+      } catch { /* try next feed */ }
     }
-  });
-}
-
-/* Helpers for RSS visuals */
-function pickImage(it){
-  // normalized fields our /api/rss may return
-  if (isHttp(it.image)) return it.image;
-  if (isHttp(it?.mediaThumbnail?.url)) return it.mediaThumbnail.url;
-  if (isHttp(it?.media?.url)) return it.media.url;
-  if (isHttp(it?.enclosure?.url)) return it.enclosure.url;
-  // scrape first <img> in description/summary
-  const html = it.description || it.summary || '';
-  const m = html.match(/<img[^>]+src=["']([^"']+)["']/i);
-  if (m && isHttp(m[1])) return m[1];
-  // fallback to app icon
-  return '/icon-192.png';
-}
-function isHttp(u){ return typeof u === 'string' && /^https?:\/\//i.test(u); }
-function safeHost(u){ try { return new URL(u).hostname.replace(/^www\./,''); } catch { return ''; } }
-function formatWhen(d){
-  const dt = new Date(d);
-  if (isNaN(+dt)) return '';
-  const mins = Math.floor((Date.now() - dt.getTime())/60000);
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins/60);
-  if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs/24);
-  return `${days}d ago`;
-}
-function escapeHtml(s){
-  return String(s).replace(/[&<>"']/g, c => ({
-    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-  }[c]));
+    content.innerHTML = rssErrorMarkup();
+  })();
 }
 
 /* -----------------------------
@@ -287,7 +293,7 @@ function loadQuotesInto(card, symbols) {
   const url = `/api/quote?symbols=${encodeURIComponent(symbols.join(','))}`;
   fetch(url).then(r=>r.json()).then(data=>{
     const map = {};
-    (data.quotes||[]).forEach(q=>{ map[q.symbol.toUpperCase()] = q; });
+    (data.items||data.quotes||[]).forEach(q=>{ map[q.symbol.toUpperCase()] = q; });
     const rows = card.querySelectorAll(".trow");
     rows.forEach(row=>{
       const sym = row.dataset.sym.toUpperCase();
@@ -296,14 +302,14 @@ function loadQuotesInto(card, symbols) {
       const priceEl = row.querySelector("[data-price]");
       const chgEl   = row.querySelector("[data-chg]");
       const price = q.price;
-      const delta = q.change;
-      const pct   = q.changePercent;
-      priceEl.textContent = (price!=null) ? price.toFixed(2) : "—";
+      const delta = q.change ?? q.changeAbs ?? null;
+      const pct   = q.changePercent ?? q.changePct24h ?? null;
+      priceEl.textContent = (price!=null) ? (typeof price === 'number' ? price.toFixed(2) : price) : "—";
       chgEl.textContent   = (delta!=null && pct!=null)
-        ? `${delta>=0?"+":""}${delta.toFixed(2)}  (${pct>=0?"+":""}${pct.toFixed(2)}%)`
+        ? `${delta>=0?"+":""}${Number(delta).toFixed(2)}  (${pct>=0?"+":""}${Number(pct).toFixed(2)}%)`
         : "—";
-      row.classList.toggle("up",   delta >= 0);
-      row.classList.toggle("down", delta <  0);
+      row.classList.toggle("up",   Number(delta) >= 0);
+      row.classList.toggle("down", Number(delta) <  0);
     });
   }).catch(()=>{
     if (content && !content.querySelector(".ticker")) {
@@ -389,22 +395,19 @@ function tileContentFor(section) {
       const url = section.meta?.url || "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
       return spotifyMarkup(url);
     }
-    case "rss": return section.content;
-    case "gallery": {
-      const urls = section.meta?.urls || [];
-      return galleryMarkup(urls);
-    }
-    case "stocks": return section.content;
-    case "football": return section.content;
-    default: return section.content || "Empty tile";
+    case "rss":     return section.content;
+    case "gallery": return galleryMarkup(section.meta?.urls || []);
+    case "stocks":  return section.content;
+    case "football":return section.content;
+    default:        return section.content || "Empty tile";
   }
 }
 function cardHeaderActions(id){
   return `
     <div class="actions">
       <button class="btn sm settingsBtn" data-id="${id}">Settings</button>
-      <button class="btn sm expandBtn" data-id="${id}">⤢ Expand</button>
-      <button class="btn sm removeBtn" data-id="${id}">Remove</button>
+      <button class="btn sm expandBtn"   data-id="${id}">⤢ Expand</button>
+      <button class="btn sm removeBtn"   data-id="${id}">Remove</button>
     </div>
   `;
 }
@@ -537,7 +540,7 @@ function render() {
       const presetOptions = Object.keys(RSS_PRESETS).map(key=>`<option value="${key}">${key.toUpperCase()}</option>`).join("");
       fields = `
         <div class="field">
-          <label>RSS feeds (comma-separated URLs; first is used)</label>
+          <label>RSS feeds (comma-separated URLs; tried in order)</label>
           <input class="input" id="set_feeds" value="${feeds}">
         </div>
         <div class="field">
@@ -800,15 +803,13 @@ function stepPrice(p){ const drift = (Math.random()-0.5) * (p*0.004); return Mat
 function renderTicker(card, prices, prev){
   const rows = card.querySelectorAll(".trow");
   rows.forEach(row=>{
-    const sym = row.dataset.sym;
-    const priceEl = row.querySelector("[data-price]");
-    const chgEl   = row.querySelector("[data-chg]");
+    const sym   = row.dataset.sym;
     const price = prices[sym];
     const last  = prev[sym] ?? price;
     const delta = price - last;
     const pct   = (delta/last)*100;
-    priceEl.textContent = price.toFixed(2);
-    chgEl.textContent   = `${delta>=0?"+":""}${delta.toFixed(2)}  (${pct>=0?"+":""}${pct.toFixed(2)}%)`;
+    row.querySelector("[data-price]").textContent = price.toFixed(2);
+    row.querySelector("[data-chg]").textContent   = `${delta>=0?"+":""}${delta.toFixed(2)}  (${pct>=0?"+":""}${pct.toFixed(2)}%)`;
     row.classList.toggle("up",   delta >= 0);
     row.classList.toggle("down", delta <  0);
   });
@@ -981,7 +982,7 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
   `;
   __openModal(html);
   $("#g_save")?.addEventListener("click", ()=>{
-    const theme = $("#g_theme").value;
+    const theme   = $("#g_theme").value;
     const density = $("#g_density").value;
     prefs.theme = theme; prefs.density = density;
     localStorage.setItem(K_PREFS, JSON.stringify(prefs));
@@ -994,7 +995,7 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
    Modal close safety net
 ----------------------------- */
 (function modalSafetyNet(){
-  const modal = document.getElementById('modal');
+  const modal    = document.getElementById('modal');
   const backdrop = document.getElementById('fsBackdrop');
 
   function isOpen() {
