@@ -1,8 +1,8 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.0
+   LifeCre8 — main.js  v1.10.0
    - Solar + Ice themes
    - Modal safety-net (close on Save/Cancel/backdrop/Esc)
-   - LIVE NEWS via /api/rss (real RSS → JSON) with presets
+   - LIVE NEWS via /api/rss (real RSS → JSON) with presets + thumbnails
    - LIVE MARKETS via /api/quote (Yahoo Finance → JSON) with presets
    - Smart "Add Tile" commands: "news tech", "news world", etc.
 ============================================================ */
@@ -13,7 +13,7 @@ const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
 const K_PREFS      = "lifecre8.prefs"; // theme, density
-const DATA_VERSION = 5;
+const DATA_VERSION = 6;
 
 /* ===== Presets ===== */
 const RSS_PRESETS = {
@@ -163,7 +163,7 @@ function spotifyMarkup(spotifyUrl) {
 }
 
 /* -----------------------------
-   RSS tile (LIVE via /api/rss)
+   RSS (LIVE via /api/rss) — with thumbnails & nicer layout
 ----------------------------- */
 function rssMarkup(items) {
   if (!items || !items.length) {
@@ -176,18 +176,26 @@ function rssMarkup(items) {
       </div>
     `;
   }
-  const list = items.map(i => `
-    <div class="rss-item">
-      <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
-      <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
-    </div>
-  `).join("");
+  const list = items.map(i => {
+    const img = pickImage(i);
+    const host = safeHost(i.link) || (i.source || '');
+    const when = i.pubDate ? ` • ${formatWhen(i.pubDate)}` : (i.time ? ` — ${i.time}` : '');
+    return `
+      <article class="news-item">
+        <div class="news-thumb"><img src="${img}" alt="thumbnail" loading="lazy"></div>
+        <div class="news-meta">
+          <h4 class="news-title"><a href="${i.link}" target="_blank" rel="noopener">${escapeHtml(i.title||'(untitled)')}</a></h4>
+          <div class="news-source">${escapeHtml(host)}${when}</div>
+        </div>
+      </article>
+    `;
+  }).join("");
   return `
     <div class="rss" data-rss>
-      <div class="rss-controls">
+      <div class="rss-controls" style="margin-bottom:8px">
         <button class="btn sm rss-refresh">Refresh</button>
       </div>
-      ${list}
+      <div class="news-list">${list}</div>
     </div>
   `;
 }
@@ -215,6 +223,38 @@ function loadRssInto(card, feeds, attempt=1) {
       content.innerHTML = rssErrorMarkup();
     }
   });
+}
+
+/* Helpers for RSS visuals */
+function pickImage(it){
+  // normalized fields our /api/rss may return
+  if (isHttp(it.image)) return it.image;
+  if (isHttp(it?.mediaThumbnail?.url)) return it.mediaThumbnail.url;
+  if (isHttp(it?.media?.url)) return it.media.url;
+  if (isHttp(it?.enclosure?.url)) return it.enclosure.url;
+  // scrape first <img> in description/summary
+  const html = it.description || it.summary || '';
+  const m = html.match(/<img[^>]+src=["']([^"']+)["']/i);
+  if (m && isHttp(m[1])) return m[1];
+  // fallback to app icon
+  return '/icon-192.png';
+}
+function isHttp(u){ return typeof u === 'string' && /^https?:\/\//i.test(u); }
+function safeHost(u){ try { return new URL(u).hostname.replace(/^www\./,''); } catch { return ''; } }
+function formatWhen(d){
+  const dt = new Date(d);
+  if (isNaN(+dt)) return '';
+  const mins = Math.floor((Date.now() - dt.getTime())/60000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins/60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs/24);
+  return `${days}d ago`;
+}
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
 }
 
 /* -----------------------------
