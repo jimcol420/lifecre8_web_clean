@@ -1,10 +1,11 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.1
+   LifeCre8 — main.js  v1.9.2
    - Solar + Ice themes
    - Modal safety-net (close on Save/Cancel/backdrop/Esc)
    - LIVE NEWS via /api/rss (real RSS → JSON) with presets
    - LIVE MARKETS via /api/quote (Yahoo Finance → JSON) with presets
-   - Smart "Add Tile" commands: "news tech", "news world", etc.
+   - Smart "Add Tile" commands (news/world/tech/finance/uk, youtube, stocks…)
+   - NEW: Any free-text query -> Google News RSS tile (with image enrichment)
    - NEW: RSS image enrichment via /api/preview (og:image) + caching
 ============================================================ */
 
@@ -76,7 +77,7 @@ if (!fsBackdrop) {
 }
 
 /* =================================================================
-   NEW: Lightweight preview cache + /api/preview helper (og:image)
+   Preview cache + /api/preview helper (og:image, favicon) for RSS
 ================================================================= */
 const PREVIEW_CACHE_KEY = "lifecre8.previewCache";
 let previewCache = {};
@@ -104,12 +105,7 @@ async function getPreview(url) {
 /* -----------------------------
    YouTube helpers
 ----------------------------- */
-const YT_DEFAULTS = [
-  "M7lc1UVf-VE",
-  "5qap5aO4i9A",
-  "DWcJFNfaw9c",
-  "jfKfPfyJRdk",
-];
+const YT_DEFAULTS = ["M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk"];
 const ytEmbedSrc = (id) => `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
 function ytPlaylistMarkup(playlist, currentId) {
   const ids = (playlist && playlist.length) ? playlist : YT_DEFAULTS;
@@ -850,31 +846,52 @@ function flashGoal(card, matchIdx, scoreText){
 }
 
 /* -----------------------------
-   Add Tile
+   Add Tile (smarter)
 ----------------------------- */
+
+// Build a Google News RSS feed for any query (region set to GB English)
+const gNewsFeed = (q) =>
+  `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`;
+
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
 const tileSearch = $("#tileSearch");
+
 addBtn.addEventListener("click", () => {
   tileMenu.classList.toggle("hidden");
   if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
 });
+
 tileSearch.addEventListener("keydown", (e)=>{
   if (e.key === "Enter") {
-    const val = tileSearch.value.trim();
-    if (!val) return;
+    const raw = tileSearch.value.trim();
+    if (!raw) return;
 
+    const val = raw;
     let newTile = null;
 
-    // Quick commands for RSS presets
-    const cmdNews = val.match(/^news\s+(world|tech|finance|uk)$/i);
-    if (cmdNews) {
-      const key = cmdNews[1].toLowerCase();
+    // 1) NEWS commands
+    // "news" => default UK preset
+    if (/^news$/i.test(val)) {
+      const feeds = RSS_PRESETS.uk;
+      newTile = { id: uid(), type:"rss", title:`Daily Brief (UK)`, meta:{ feeds }, content: rssMarkup([]) };
+    }
+    // "news <topic>" => Google News feed for topic
+    const mNewsTopic = val.match(/^news\s+(.+)$/i);
+    if (!newTile && mNewsTopic) {
+      const topic = mNewsTopic[1].trim();
+      const feed  = gNewsFeed(topic);
+      newTile = { id: uid(), type:"rss", title: `News — ${topic.replace(/\b\w/g, m=>m.toUpperCase())}`, meta:{ feeds:[feed] }, content: rssMarkup([]) };
+    }
+    // Preset shortcuts (world/tech/finance/uk)
+    const cmdNewsPreset = val.match(/^news\s+(world|tech|finance|uk)$/i);
+    if (!newTile && cmdNewsPreset) {
+      const key = cmdNewsPreset[1].toLowerCase();
       const feeds = RSS_PRESETS[key] || RSS_PRESETS.uk;
       newTile = { id: uid(), type:"rss", title:`Daily Brief (${key})`, meta:{ feeds }, content: rssMarkup([]) };
     }
 
-    // YouTube by URL or keyword "youtube ..."
+    // 2) YouTube (by url or "youtube <query>" -> starter playlist)
     if (!newTile) {
       const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
       if (ytUrl) {
@@ -887,19 +904,19 @@ tileSearch.addEventListener("keydown", (e)=>{
       }
     }
 
-    // Spotify
+    // 3) Spotify
     if (!newTile && /spotify/i.test(val)) {
       const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
       newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
     }
 
-    // Stocks
+    // 4) Stocks
     if (!newTile && /stocks?|markets?/i.test(val)) {
       const symbols = ["AAPL","MSFT","BTC-USD"];
       newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
     }
 
-    // Weather (stub)
+    // 5) Weather (stub)
     if (!newTile && /weather/i.test(val)) {
       const html = `
         <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
@@ -909,21 +926,23 @@ tileSearch.addEventListener("keydown", (e)=>{
       newTile = { id: uid(), type:"weather", title:"Weather", content: html };
     }
 
-    // Football
+    // 6) Football
     if (!newTile && /(football|soccer|scores|prem|premier)/i.test(val)) {
       newTile = { id: uid(), type:"football", title:"Football", content: footballMarkupSeed() };
     }
 
-    // URL -> Web embed (Preview default)
+    // 7) URL -> Web tile (Preview default)
     const isUrl = /^https?:\/\//i.test(val);
     if (!newTile && isUrl) {
       const url = val;
       newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
     }
 
-    // Fallback -> Interest
+    // 8) Fallback: ANY free-text -> Google News tile for that topic
     if (!newTile) {
-      newTile = { id: uid(), type:"interest", title: val.replace(/\b\w/g, m=>m.toUpperCase()), content: `Auto-created tile for <strong>${val}</strong>` };
+      const topic = val;
+      const feed  = gNewsFeed(topic);
+      newTile = { id: uid(), type:"rss", title: topic.replace(/\b\w/g, m=>m.toUpperCase()), meta:{ feeds:[feed] }, content: rssMarkup([]) };
     }
 
     sections.push(newTile);
