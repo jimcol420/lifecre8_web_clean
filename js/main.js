@@ -1,10 +1,15 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.3
-   - Builds on v1.9.2 baseline
-   - NEW: Smart Tile (topic → Wikipedia summary + Google News via /api/rss)
-   - Better “Add Tile” commands (news, news <topic>, football fixtures today)
-   - New tiles prepend to top-left (unshift)
-   - Keeps Solar/Ice themes, density, modal safety-net, live RSS/quotes
+   LifeCre8 — main.js  v1.9.4
+   - Builds on v1.9.3 (stable baseline)
+   - Fix: Global Settings theme dropdown (Ice option)
+   - Guards: safer wiring for Add Tile + Assistant toggle
+   - Smarter Add Tile remains:
+       • "news" => BBC UK feed with images
+       • "news <topic>" => topic feed (Google News RSS, server enrich)
+       • "football fixtures today" => quick fixtures snapshot + BBC page
+       • generic queries => try /api/ai-search (optional), else RSS+Gallery
+   - Daily Brief images via /api/rss?full=1 and BBC-first bias
+   - New tiles prepend (top-left) instead of appending
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -13,31 +18,34 @@ const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
 const K_PREFS      = "lifecre8.prefs"; // theme, density
-const DATA_VERSION = 6;
+const DATA_VERSION = 5;
 
 /* ===== Presets ===== */
 const RSS_PRESETS = {
   world: [
     "https://feeds.bbci.co.uk/news/world/rss.xml",
-    "https://www.reuters.com/world/rss"
+    "https://www.reuters.com/world/rss",
   ],
   tech: [
     "https://www.theverge.com/rss/index.xml",
     "https://www.engadget.com/rss.xml",
-    "https://www.wired.com/feed/rss"
+    "https://www.wired.com/feed/rss",
   ],
   finance: [
     "https://feeds.bbci.co.uk/news/business/rss.xml",
-    "https://www.reuters.com/markets/rss"
+    "https://www.reuters.com/markets/rss",
   ],
   uk: [
-    "https://news.google.com/rss?hl=en-GB&gl=GB&ceid=GB:en"
-  ]
+    // Bias BBC first for consistent images/titles
+    "https://feeds.bbci.co.uk/news/rss.xml",
+    "https://www.theguardian.com/uk-news/rss",
+  ],
 };
+
 const STOCK_PRESETS = {
   "Tech Giants": ["AAPL","MSFT","GOOGL","AMZN","NVDA"],
   "Crypto": ["BTC-USD","ETH-USD","SOL-USD"],
-  "US Indexes": ["^GSPC","^DJI","^IXIC"]
+  "US Indexes": ["^GSPC","^DJI","^IXIC"],
 };
 
 /* ===== State ===== */
@@ -47,10 +55,10 @@ let chat        = JSON.parse(localStorage.getItem(K_CHAT)      || "[]");
 if (!chat.length) chat = [{ role:'ai', text:"Hi! I'm your AI Assistant. Ask me anything." }];
 
 let prefs = JSON.parse(localStorage.getItem(K_PREFS) || "{}");
-if (!prefs.theme) prefs.theme = "solar";      // "solar" | "ice"
-if (!prefs.density) prefs.density = "comfortable"; // "comfortable" | "compact"
-document.body.classList.toggle('theme-ice', prefs.theme === 'ice');
-document.body.classList.toggle('density-compact', prefs.density === 'compact');
+if (!prefs.theme)   prefs.theme   = "solar";           // "solar" | "ice"
+if (!prefs.density) prefs.density = "comfortable";     // "comfortable" | "compact"
+document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
+document.body.classList.toggle('density-compact',  prefs.density === 'compact');
 
 /* timers for dynamic tiles */
 let dynamicTimers = {};
@@ -77,10 +85,10 @@ if (!fsBackdrop) {
    YouTube helpers
 ----------------------------- */
 const YT_DEFAULTS = [
-  "M7lc1UVf-VE",
-  "5qap5aO4i9A",
-  "DWcJFNfaw9c",
-  "jfKfPfyJRdk",
+  "M7lc1UVf-VE", // demo
+  "5qap5aO4i9A", // lofi
+  "DWcJFNfaw9c", // coding mix
+  "jfKfPfyJRdk", // lofi beats
 ];
 const ytEmbedSrc = (id) => `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
 function ytPlaylistMarkup(playlist, currentId) {
@@ -164,22 +172,15 @@ function spotifyMarkup(spotifyUrl) {
 /* -----------------------------
    RSS tile (LIVE via /api/rss)
 ----------------------------- */
-function rssMarkup(items) {
-  if (!items || !items.length) {
-    return `
-      <div class="rss" data-rss>
-        <div class="rss-controls">
-          <button class="btn sm rss-refresh">Refresh</button>
-        </div>
-        <div class="muted">Loading…</div>
+function rssListMarkup(items) {
+  const list = (items || []).map(i => `
+    <div class="rss-item" style="display:flex; gap:10px; align-items:flex-start;">
+      ${i.image ? `<img src="${i.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--border)" />`
+                 : `<div style="width:56px;height:56px;border-radius:8px;border:1px solid var(--border);background:#0a1522"></div>`}
+      <div>
+        <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
+        <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
       </div>
-    `;
-  }
-  const list = items.map(i => `
-    <div class="rss-item">
-      ${i.image ? `<img src="${i.image}" alt="" style="width:100%;max-height:140px;object-fit:cover;border-radius:10px;margin-bottom:6px;border:1px solid var(--border)">` : ``}
-      <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
-      <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
     </div>
   `).join("");
   return `
@@ -191,34 +192,37 @@ function rssMarkup(items) {
     </div>
   `;
 }
+function rssLoadingMarkup() {
+  return `
+    <div class="rss" data-rss>
+      <div class="rss-controls"><button class="btn sm rss-refresh">Refresh</button></div>
+      <div class="muted">Loading…</div>
+    </div>
+  `;
+}
 function rssErrorMarkup() {
   return `
     <div class="rss" data-rss>
-      <div class="rss-controls">
-        <button class="btn sm rss-refresh">Refresh</button>
-      </div>
+      <div class="rss-controls"><button class="btn sm rss-refresh">Refresh</button></div>
       <div class="muted">Couldn’t load news right now. Try Refresh in a moment.</div>
     </div>
   `;
 }
-function googleNewsFeedFor(topic) {
-  // UK locale feed for topic
-  return `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
-}
 function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
-  const url = `/api/rss?url=${encodeURIComponent(feeds[0])}`;
-  fetch(url).then(r=>r.json()).then(data=>{
-    const items = (data.items||[]).slice(0,10);
-    content.innerHTML = rssMarkup(items);
-  }).catch(()=>{
-    if (attempt < 2) {
-      setTimeout(()=>loadRssInto(card, feeds, attempt+1), 1000);
-    } else {
-      content.innerHTML = rssErrorMarkup();
-    }
-  });
+
+  const url = `/api/rss?full=1&url=${encodeURIComponent(feeds[0])}`; // image-enriched
+  fetch(url)
+    .then(r=>r.json())
+    .then(data=>{
+      const items = (data.items||[]).slice(0,10);
+      content.innerHTML = rssListMarkup(items);
+    })
+    .catch(()=>{
+      if (attempt < 2) setTimeout(()=>loadRssInto(card, feeds, attempt+1), 1000);
+      else content.innerHTML = rssErrorMarkup();
+    });
 }
 
 /* -----------------------------
@@ -247,33 +251,36 @@ function tickerMarkup(symbols) {
   return `<div class="ticker" data-symbols="${symbols.join(",")}">${rows}</div>`;
 }
 function loadQuotesInto(card, symbols) {
-  const content = card.querySelector(".content");
   const url = `/api/quote?symbols=${encodeURIComponent(symbols.join(','))}`;
-  fetch(url).then(r=>r.json()).then(data=>{
-    const map = {};
-    (data.quotes||[]).forEach(q=>{ map[q.symbol.toUpperCase()] = q; });
-    const rows = card.querySelectorAll(".trow");
-    rows.forEach(row=>{
-      const sym = row.dataset.sym.toUpperCase();
-      const q = map[sym];
-      if (!q) return;
-      const priceEl = row.querySelector("[data-price]");
-      const chgEl   = row.querySelector("[data-chg]");
-      const price = q.price;
-      const delta = q.change;
-      const pct   = q.changePercent;
-      priceEl.textContent = (price!=null) ? price.toFixed(2) : "—";
-      chgEl.textContent   = (delta!=null && pct!=null)
-        ? `${delta>=0?"+":""}${delta.toFixed(2)}  (${pct>=0?"+":""}${pct.toFixed(2)}%)`
-        : "—";
-      row.classList.toggle("up",   delta >= 0);
-      row.classList.toggle("down", delta <  0);
+  fetch(url)
+    .then(r=>r.json())
+    .then(data=>{
+      const map = {};
+      (data.quotes||[]).forEach(q=>{ map[q.symbol.toUpperCase()] = q; });
+      const rows = card.querySelectorAll(".trow");
+      rows.forEach(row=>{
+        const sym = row.dataset.sym.toUpperCase();
+        const q = map[sym];
+        if (!q) return;
+        const priceEl = row.querySelector("[data-price]");
+        const chgEl   = row.querySelector("[data-chg]");
+        const price = q.price;
+        const delta = q.change;
+        const pct   = q.changePercent;
+        priceEl.textContent = (price!=null) ? price.toFixed(2) : "—";
+        chgEl.textContent   = (delta!=null && pct!=null)
+          ? `${delta>=0?"+":""}${delta.toFixed(2)}  (${pct>=0?"+":""}${pct.toFixed(2)}%)`
+          : "—";
+        row.classList.toggle("up",   delta >= 0);
+        row.classList.toggle("down", delta <  0);
+      });
+    })
+    .catch(()=>{
+      const content = card.querySelector(".content");
+      if (content && !content.querySelector(".ticker")) {
+        content.innerHTML = `<div class="muted">Live prices unavailable right now.</div>`;
+      }
     });
-  }).catch(()=>{
-    if (content && !content.querySelector(".ticker")) {
-      content.innerHTML = `<div class="muted">Live prices unavailable right now.</div>`;
-    }
-  });
 }
 
 /* -----------------------------
@@ -297,81 +304,6 @@ function footballMarkupSeed() {
 }
 
 /* -----------------------------
-   Smart Tile (Wikipedia + Google News)
------------------------------ */
-function smartTileLoading(topic) {
-  return `
-    <div class="smart" data-smart data-topic="${topic}">
-      <div class="muted">Loading info for “${topic}”…</div>
-    </div>
-  `;
-}
-function smartTileMarkup(topic, wiki, items) {
-  const thumb = wiki?.thumbnail?.source || "";
-  const desc  = wiki?.extract || "No summary available.";
-  const url   = wiki?.content_urls?.desktop?.page || (wiki?.canonicalurl || "");
-
-  const newsList = (items||[]).slice(0,5).map(i=>`
-    <div class="rss-item">
-      ${i.image ? `<img src="${i.image}" alt="" style="width:100%;max-height:120px;object-fit:cover;border-radius:10px;margin-bottom:6px;border:1px solid var(--border)">` : ``}
-      <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
-      <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
-    </div>
-  `).join("");
-
-  return `
-    <div class="smart" data-smart data-topic="${topic}">
-      <div class="row" style="gap:12px;align-items:flex-start;margin-bottom:10px">
-        ${thumb ? `<img src="${thumb}" alt="" style="width:84px;height:84px;object-fit:cover;border-radius:10px;border:1px solid var(--border)">` : ``}
-        <div style="flex:1 1 auto">
-          <div style="font-weight:700;margin-bottom:6px">${capitalize(topic)}</div>
-          <div class="muted" style="line-height:1.4">${desc}</div>
-          ${url ? `<div style="margin-top:6px"><a class="btn sm" href="${url}" target="_blank" rel="noopener">Read more on Wikipedia</a></div>` : ``}
-        </div>
-      </div>
-      <div style="margin:8px 0 6px;font-weight:700">Latest news</div>
-      <div class="rss">${newsList || `<div class="muted">No recent articles.</div>`}</div>
-    </div>
-  `;
-}
-async function fetchWiki(topic) {
-  // Try the REST summary first, fallback to older endpoint
-  const try1 = fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topic)}`, {headers:{'accept':'application/json'}})
-    .then(r=>r.ok?r.json():Promise.reject());
-  try {
-    return await try1;
-  } catch {
-    try {
-      const r = await fetch(`https://en.wikipedia.org/w/api.php?action=query&prop=extracts|pageimages|info&explaintext=1&inprop=url&format=json&origin=*&pithumbsize=400&titles=${encodeURIComponent(topic)}`);
-      const j = await r.json();
-      const page = j?.query?.pages ? Object.values(j.query.pages)[0] : null;
-      if (!page) return null;
-      return {
-        extract: page.extract,
-        thumbnail: page.thumbnail ? { source: page.thumbnail.source } : null,
-        content_urls: { desktop: { page: page.fullurl } }
-      };
-    } catch { return null; }
-  }
-}
-async function buildSmartTile(card, topic) {
-  const content = card.querySelector(".content");
-  if (!content) return;
-  content.innerHTML = smartTileLoading(topic);
-
-  let wiki = null, newsItems = [];
-  try { wiki = await fetchWiki(topic); } catch {}
-  try {
-    const feedUrl = googleNewsFeedFor(topic);
-    const res = await fetch(`/api/rss?url=${encodeURIComponent(feedUrl)}`);
-    const data = await res.json();
-    newsItems = (data.items||[]).slice(0,8);
-  } catch {}
-
-  content.innerHTML = smartTileMarkup(topic, wiki, newsItems);
-}
-
-/* -----------------------------
    Defaults (seed)
 ----------------------------- */
 function gallerySeed() {
@@ -386,7 +318,7 @@ function gallerySeed() {
 }
 function defaultSections() {
   return [
-    { id: uid(), type:"rss",      title:"Daily Brief", meta:{ feeds: RSS_PRESETS.uk }, content: rssMarkup([]) },
+    { id: uid(), type:"rss",      title:"Daily Brief", meta:{ feeds: RSS_PRESETS.uk }, content: rssLoadingMarkup() },
     { id: uid(), type:"web",      title:"BBC News",    meta:{url:"https://www.bbc.com", mode:"preview"}, content: webTileMarkup("https://www.bbc.com","preview") },
     { id: uid(), type:"youtube",  title:"YouTube",     meta:{ playlist:[...YT_DEFAULTS], current:"M7lc1UVf-VE" }, content: ytPlaylistMarkup(YT_DEFAULTS, "M7lc1UVf-VE") },
     { id: uid(), type:"stocks",   title:"Markets",     meta:{ symbols:["AAPL","MSFT","BTC-USD"] }, content: tickerMarkup(["AAPL","MSFT","BTC-USD"]) },
@@ -428,14 +360,16 @@ function tileContentFor(section) {
       const url = section.meta?.url || "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
       return spotifyMarkup(url);
     }
-    case "rss": return section.content;
+    case "rss": {
+      // content is filled by loadRssInto
+      return section.content || rssLoadingMarkup();
+    }
     case "gallery": {
       const urls = section.meta?.urls || [];
       return galleryMarkup(urls);
     }
     case "stocks": return section.content;
     case "football": return section.content;
-    case "smart": return section.content; // will be hydrated
     default: return section.content || "Empty tile";
   }
 }
@@ -475,17 +409,6 @@ function render() {
 
   initDynamicTiles();
   initLiveFeeds();   // load live RSS + quotes
-  hydrateSmartTiles();
-}
-
-/* hydrate smart tiles after render */
-function hydrateSmartTiles(){
-  $$('.card[data-type="smart"]').forEach(card=>{
-    const id = card.dataset.id;
-    const s = sections.find(x=>x.id===id);
-    const topic = s?.meta?.topic;
-    if (topic) buildSmartTile(card, topic);
-  });
 }
 
 /* -----------------------------
@@ -602,15 +525,6 @@ function hydrateSmartTiles(){
           </div>
         </div>
       `;
-    } else if (s.type === "smart") {
-      const topic = (s.meta?.topic || "").trim();
-      fields = `
-        <div class="field">
-          <label>Topic</label>
-          <input class="input" id="set_topic" value="${topic}">
-        </div>
-        <div class="muted">Smart tiles show a Wikipedia summary & related news for your topic.</div>
-      `;
     } else {
       fields = `<div class="muted">No settings for this tile.</div>`;
     }
@@ -663,16 +577,10 @@ function hydrateSmartTiles(){
         const feeds = ($("#set_feeds")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
         const list = feeds.length? feeds : (s.meta?.feeds || RSS_PRESETS.uk);
         s.meta = {...(s.meta||{}), feeds: list};
-        s.content = rssMarkup([]); // loading
-      } else if (s.type === "smart") {
-        const topic = ($("#set_topic")?.value || "").trim();
-        if (topic) {
-          s.meta = {...(s.meta||{}), topic };
-          s.title = capitalize(topic);
-          s.content = smartTileLoading(topic);
-        }
+        s.content = rssLoadingMarkup(); // loading
       }
       localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+      __closeModal();
       render();
     }, { once:true });
   });
@@ -792,7 +700,7 @@ function stopLiveIntervals(){
   liveIntervals = {};
 }
 function initDynamicTiles(){
-  // Simulated football
+  // Simulated football (visual heartbeat)
   $$('.card[data-type="football"]').forEach(card=>{
     const container = card.querySelector(".scores");
     if (!container) return;
@@ -824,7 +732,7 @@ function initDynamicTiles(){
     dynamicTimers[card.dataset.id] = timer;
   });
 
-  // Simulated stocks as fallback (live feed overwrites)
+  // Simulated stocks as fallback (live overwrites on arrival)
   $$('.card[data-type="stocks"]').forEach(card=>{
     const ticker = card.querySelector(".ticker");
     if (!ticker) return;
@@ -895,42 +803,69 @@ function flashGoal(card, matchIdx, scoreText){
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
 const tileSearch = $("#tileSearch");
-addBtn.addEventListener("click", () => {
-  tileMenu.classList.toggle("hidden");
-  if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
-});
-tileSearch.addEventListener("keydown", async (e)=>{
-  if (e.key === "Enter") {
-    const val = tileSearch.value.trim();
-    if (!val) return;
 
+if (!addBtn || !tileMenu || !tileSearch) {
+  console.warn('[init] Add-tile controls missing in DOM');
+} else {
+  addBtn.addEventListener("click", () => {
+    tileMenu.classList.toggle("hidden");
+    if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
+  });
+
+  tileSearch.addEventListener("keydown", (e)=>{
+    if (e.key !== "Enter") {
+      if (e.key === "Escape") tileMenu.classList.add("hidden");
+    return;
+    }
+
+    const valRaw = tileSearch.value.trim();
+    if (!valRaw) return;
+
+    const val = valRaw.replace(/\s+/g, " ");
     let newTile = null;
-    let title   = null;
 
-    // === Intent routing ===
-    // 1) Special: football fixtures today -> Web tile to BBC fixtures (live)
-    if (/football/i.test(val) && /fixtures/i.test(val) && /today/i.test(val)) {
-      const url = "https://www.bbc.co.uk/sport/football/scores-fixtures";
-      newTile = { id: uid(), type:"web", title:"Football — Fixtures (Today)", meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
-    }
-
-    // 2) News only → UK top news
-    if (!newTile && /^news$/i.test(val)) {
-      const feeds = RSS_PRESETS.uk;
-      newTile = { id: uid(), type:"rss", title:"Top News (UK)", meta:{ feeds }, content: rssMarkup([]) };
-    }
-
-    // 3) News + topic → Google News feed for topic
-    if (!newTile) {
-      const m = val.match(/^news\s+(.+)$/i);
-      if (m && m[1]) {
-        const topic = m[1].trim();
-        const feed = googleNewsFeedFor(topic);
-        newTile = { id: uid(), type:"rss", title:`News — ${capitalize(topic)}`, meta:{ feeds:[feed] }, content: rssMarkup([]) };
+    // 1) Quick commands: news / news <topic>
+    const mNews = val.match(/^news(?:\s+(.+))?$/i);
+    if (mNews) {
+      const topic = (mNews[1]||"").trim();
+      if (!topic) {
+        const feeds = RSS_PRESETS.uk;
+        newTile = { id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() };
+      } else {
+        // Topic feed (Google News RSS; backend should enrich images with full=1)
+        const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
+        newTile = { id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
       }
     }
 
-    // 4) YouTube by URL or keyword "youtube ..."
+    // 2) Football fixtures today
+    if (!newTile && /(football|soccer).*(fixtures|today|scores)/i.test(val)) {
+      const fixUrl = "https://www.bbc.co.uk/sport/football/scores-fixtures";
+      const html = `
+        <div>
+          <div class="muted">Quick fixtures snapshot — open BBC for full details.</div>
+          <ul id="fx-quick" style="margin:8px 0 12px; display:grid; gap:6px;"></ul>
+          <div class="web-actions">
+            <button class="btn sm web-toggle" data-mode="embed">Embed</button>
+            <a class="btn sm" href="${fixUrl}" target="_blank" rel="noopener">Open</a>
+          </div>
+        </div>`;
+      newTile = { id: uid(), type: "web", title: "Football — Fixtures (Today)", meta:{ url: fixUrl, mode:"preview" }, content: html };
+      // async quick snapshot:
+      setTimeout(()=>{
+        const card = document.querySelector(`.card[data-id="${newTile.id}"]`);
+        const list = card?.querySelector('#fx-quick');
+        if (!list) return;
+        fetch(`/api/rss?url=${encodeURIComponent('https://feeds.bbci.co.uk/sport/football/rss.xml')}`)
+          .then(r=>r.json()).then(data=>{
+            const items = (data.items||[]).slice(0,5);
+            list.innerHTML = items.map(i=>`<li><a href="${i.link}" target="_blank" rel="noopener">${i.title}</a></li>`).join("");
+          })
+          .catch(()=>{ list.innerHTML = `<li class="muted">Open for full fixtures →</li>`; });
+      }, 80);
+    }
+
+    // 3) YouTube by URL or "youtube ..."
     if (!newTile) {
       const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
       if (ytUrl) {
@@ -943,19 +878,19 @@ tileSearch.addEventListener("keydown", async (e)=>{
       }
     }
 
-    // 5) Spotify
+    // 4) Spotify keyword
     if (!newTile && /spotify/i.test(val)) {
       const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
       newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
     }
 
-    // 6) Stocks
+    // 5) Stocks keyword
     if (!newTile && /stocks?|markets?/i.test(val)) {
       const symbols = ["AAPL","MSFT","BTC-USD"];
       newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
     }
 
-    // 7) Weather (stub)
+    // 6) Weather (stub)
     if (!newTile && /weather/i.test(val)) {
       const html = `
         <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
@@ -965,31 +900,84 @@ tileSearch.addEventListener("keydown", async (e)=>{
       newTile = { id: uid(), type:"weather", title:"Weather", content: html };
     }
 
-    // 8) URL -> Web embed (Preview default)
+    // 7) URL -> Web embed (Preview default)
     const isUrl = /^https?:\/\//i.test(val);
     if (!newTile && isUrl) {
       const url = val;
       newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
     }
 
-    // 9) Fallback → SMART TILE (topic)
+    // 8) Generic topic => AI (optional) or RSS + Gallery
     if (!newTile) {
-      const topic = val;
-      title = capitalize(topic);
-      newTile = { id: uid(), type:"smart", title, meta:{ topic }, content: smartTileLoading(topic) };
+      // Try optional AI endpoint
+      fetch(`/api/ai-search?q=${encodeURIComponent(val)}`, { method:"GET" })
+        .then(r=>{
+          if (!r.ok) throw new Error("ai-search not available");
+          return r.json();
+        })
+        .then(plan=>{
+          const tiles = plan.tiles || [];
+          // translate plan tiles into sections
+          const made = tiles.map(t => {
+            if (t.type === "rss" && t.feeds?.length) {
+              return { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
+            }
+            if (t.type === "web" && t.url) {
+              return { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
+            }
+            if (t.type === "youtube" && t.playlist?.length) {
+              const cur = t.playlist[0];
+              return { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
+            }
+            if (t.type === "stocks" && t.symbols?.length) {
+              return { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
+            }
+            if (t.type === "gallery" && t.images?.length) {
+              return { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
+            }
+            return null;
+          }).filter(Boolean);
+
+          if (made.length) {
+            // prepend in reverse to keep intended order starting at top-left
+            for (let i = made.length - 1; i >= 0; i--) {
+              sections.unshift(made[i]);
+            }
+            localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+            render();
+            tileMenu.classList.add("hidden");
+            tileSearch.value = "";
+            return;
+          }
+          throw new Error("ai-search empty plan");
+        })
+        .catch(()=>{
+          // Fallback: Topic RSS + Visual gallery
+          const gn = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
+          const img = (n)=>`https://source.unsplash.com/600x600/?${encodeURIComponent(val)}&sig=${n}`;
+          const gal = [img(1),img(2),img(3),img(4),img(5),img(6)];
+          const a = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
+          const b = { id: uid(), type:"gallery", title:`${val} — Gallery`, meta:{ urls: gal }, content: galleryMarkup(gal) };
+          // prepend gallery then rss so rss ends up top-left
+          sections.unshift(b);
+          sections.unshift(a);
+          localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+          render();
+          tileMenu.classList.add("hidden");
+          tileSearch.value = "";
+        });
+
+      return; // early — async AI path will handle persistence/render
     }
 
-    // === Prepend new tile to top-left ===
-    sections.unshift(newTile);
+    // Persist & render for synchronous branches
+    sections.unshift(newTile); // PREPEND
     localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
     render();
-
     tileMenu.classList.add("hidden");
     tileSearch.value = "";
-  } else if (e.key === "Escape") {
-    tileMenu.classList.add("hidden");
-  }
-});
+  });
+}
 
 /* -----------------------------
    Assistant Toggle & Chat
@@ -999,16 +987,20 @@ const assistantPanel  = $("#assistantPanel");
 const chatLog   = $("#assistantChat");
 const chatForm  = $("#chatForm");
 const chatInput = $("#chatInput");
+
 function updateAssistant() {
   assistantPanel.style.display = assistantOn ? "block" : "none";
-  assistantToggle.classList.toggle("primary", assistantOn);
+  if (assistantToggle) assistantToggle.classList.toggle("primary", assistantOn);
   appEl.classList.toggle("no-right", !assistantOn);
   localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
 }
-assistantToggle.addEventListener("click", () => {
-  assistantOn = !assistantOn;
-  updateAssistant();
-});
+if (assistantToggle) {
+  assistantToggle.addEventListener("click", () => {
+    assistantOn = !assistantOn;
+    updateAssistant();
+  });
+}
+
 function renderChat(){
   chatLog.innerHTML = "";
   chat.forEach(m=>{
@@ -1069,6 +1061,7 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
     localStorage.setItem(K_PREFS, JSON.stringify(prefs));
     document.body.classList.toggle('theme-ice', theme === 'ice');
     document.body.classList.toggle('density-compact', density === 'compact');
+    __closeModal();
   }, { once:true });
 });
 
@@ -1124,8 +1117,3 @@ document.addEventListener("DOMContentLoaded", () => {
   renderChat();
   render();
 });
-
-/* -----------------------------
-   Helpers
------------------------------ */
-function capitalize(s){ return (s||"").replace(/\b\w/g, m=>m.toUpperCase()); }
