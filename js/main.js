@@ -1,10 +1,11 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.0
+   LifeCre8 — main.js  v1.9.1
    - Solar + Ice themes
    - Modal safety-net (close on Save/Cancel/backdrop/Esc)
    - LIVE NEWS via /api/rss (real RSS → JSON) with presets
    - LIVE MARKETS via /api/quote (Yahoo Finance → JSON) with presets
    - Smart "Add Tile" commands: "news tech", "news world", etc.
+   - NEW: RSS image enrichment via /api/preview (og:image) + caching
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -74,6 +75,32 @@ if (!fsBackdrop) {
   document.body.appendChild(fsBackdrop);
 }
 
+/* =================================================================
+   NEW: Lightweight preview cache + /api/preview helper (og:image)
+================================================================= */
+const PREVIEW_CACHE_KEY = "lifecre8.previewCache";
+let previewCache = {};
+try { previewCache = JSON.parse(localStorage.getItem(PREVIEW_CACHE_KEY) || "{}"); } catch {}
+const PREVIEW_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+
+function previewCacheGet(url) {
+  const e = previewCache[url];
+  if (!e) return null;
+  if (Date.now() - e.ts > PREVIEW_TTL_MS) return null;
+  return e.data;
+}
+function previewCacheSet(url, data) {
+  previewCache[url] = { ts: Date.now(), data };
+  try { localStorage.setItem(PREVIEW_CACHE_KEY, JSON.stringify(previewCache)); } catch {}
+}
+async function getPreview(url) {
+  const cached = previewCacheGet(url);
+  if (cached) return cached;
+  const r = await fetch(`/api/preview?url=${encodeURIComponent(url)}`).then(r => r.json()).catch(()=>({}));
+  previewCacheSet(url, r);
+  return r;
+}
+
 /* -----------------------------
    YouTube helpers
 ----------------------------- */
@@ -113,7 +140,7 @@ function ytPlaylistMarkup(playlist, currentId) {
 /* -----------------------------
    Web tile
 ----------------------------- */
-function webTileMarkup(url, mode = "embed") {
+function webTileMarkup(url, mode = "preview") {
   const host = hostOf(url);
   const favicon = host ? `https://www.google.com/s2/favicons?domain=${host}&sz=32` : "";
   if (mode === "embed") {
@@ -162,9 +189,11 @@ function spotifyMarkup(spotifyUrl) {
   `;
 }
 
-/* -----------------------------
-   RSS tile (LIVE via /api/rss)
------------------------------ */
+/* ============================================================
+   RSS tile (LIVE via /api/rss)   [ENRICHED WITH IMAGES]
+============================================================ */
+function escapeHTML(s){return (s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+
 function rssMarkup(items) {
   if (!items || !items.length) {
     return `
@@ -176,21 +205,41 @@ function rssMarkup(items) {
       </div>
     `;
   }
-  const list = items.map(i => `
-    <div class="rss-item">
-      <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
-      <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
-    </div>
-  `).join("");
+
+  const list = items.map(i => {
+    const thumb = i.image || i.favicon || "";
+    const imgBlock = thumb
+      ? `<div style="flex:0 0 64px;height:64px;border-radius:10px;overflow:hidden;border:1px solid var(--border);background:#0a1522;display:grid;place-items:center">
+           <img src="${thumb}" alt="" style="width:100%;height:100%;object-fit:cover"/>
+         </div>`
+      : `<div style="flex:0 0 64px;height:64px;border-radius:10px;border:1px dashed var(--border);opacity:.35"></div>`;
+
+    const metaBits = [];
+    if (i.source) metaBits.push(`<span class="muted">${escapeHTML(i.source)}</span>`);
+    if (i.time)   metaBits.push(`<span class="muted"> · ${escapeHTML(i.time)}</span>`);
+
+    return `
+      <a href="${i.link}" target="_blank" rel="noopener"
+         style="display:flex;gap:12px;padding:10px;border:1px solid var(--border);border-radius:12px;background:rgba(0,0,0,.03);text-decoration:none;color:inherit">
+        ${imgBlock}
+        <div style="min-width:0;display:flex;flex-direction:column;gap:6px">
+          <div style="font-weight:650;line-height:1.3">${escapeHTML(i.title || '')}</div>
+          <div>${metaBits.join("")}</div>
+        </div>
+      </a>
+    `;
+  }).join("");
+
   return `
     <div class="rss" data-rss>
-      <div class="rss-controls">
+      <div class="rss-controls" style="margin-bottom:8px">
         <button class="btn sm rss-refresh">Refresh</button>
       </div>
-      ${list}
+      <div style="display:grid;gap:10px">${list}</div>
     </div>
   `;
 }
+
 function rssErrorMarkup() {
   return `
     <div class="rss" data-rss>
@@ -201,20 +250,38 @@ function rssErrorMarkup() {
     </div>
   `;
 }
-function loadRssInto(card, feeds, attempt=1) {
+
+async function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
+
   const url = `/api/rss?url=${encodeURIComponent(feeds[0])}`;
-  fetch(url).then(r=>r.json()).then(data=>{
-    const items = (data.items||[]).slice(0,10);
+  try {
+    const data = await fetch(url).then(r=>r.json());
+    let items = (data.items||[]).slice(0,12);
+
+    // Enrich first 6 imageless items with OG/Twitter image via /api/preview (cached)
+    const toEnrich = items
+      .map((it, i) => ({ i, it }))
+      .filter(({ it }) => !it.image && it.link)
+      .slice(0, 6);
+
+    await Promise.allSettled(toEnrich.map(async ({ i, it }) => {
+      try {
+        const p = await getPreview(it.link);
+        if (p?.image) items[i] = { ...it, image: p.image, favicon: p.favicon };
+        else if (p?.favicon) items[i] = { ...it, favicon: p.favicon };
+      } catch {}
+    }));
+
     content.innerHTML = rssMarkup(items);
-  }).catch(()=>{
+  } catch {
     if (attempt < 2) {
       setTimeout(()=>loadRssInto(card, feeds, attempt+1), 1000);
     } else {
       content.innerHTML = rssErrorMarkup();
     }
-  });
+  }
 }
 
 /* -----------------------------
@@ -853,22 +920,6 @@ tileSearch.addEventListener("keydown", (e)=>{
       const url = val;
       newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
     }
-
-    // ------- NEW: Any phrase -> News via Google News RSS -------
-    if (!newTile) {
-      const topic = val.replace(/[^\w\s-]/g,' ').trim();
-      if (topic.length) {
-        const gnews = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
-        newTile = {
-          id: uid(),
-          type: "rss",
-          title: topic.replace(/\b\w/g, m => m.toUpperCase()),
-          meta: { feeds: [gnews] },
-          content: rssMarkup([])  // loading -> /api/rss fills in
-        };
-      }
-    }
-    // -----------------------------------------------------------
 
     // Fallback -> Interest
     if (!newTile) {
