@@ -1,12 +1,10 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.2
-   - Solar + Ice themes
-   - Modal safety-net (close on Save/Cancel/backdrop/Esc)
-   - LIVE NEWS via /api/rss (real RSS → JSON) with presets
-   - LIVE MARKETS via /api/quote (Yahoo Finance → JSON) with presets
-   - Smart "Add Tile" commands (news/world/tech/finance/uk, youtube, stocks…)
-   - NEW: Any free-text query -> Google News RSS tile (with image enrichment)
-   - NEW: RSS image enrichment via /api/preview (og:image) + caching
+   LifeCre8 — main.js  v1.9.3
+   - Builds on v1.9.2 baseline
+   - NEW: Smart Tile (topic → Wikipedia summary + Google News via /api/rss)
+   - Better “Add Tile” commands (news, news <topic>, football fixtures today)
+   - New tiles prepend to top-left (unshift)
+   - Keeps Solar/Ice themes, density, modal safety-net, live RSS/quotes
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -15,7 +13,7 @@ const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
 const K_PREFS      = "lifecre8.prefs"; // theme, density
-const DATA_VERSION = 5;
+const DATA_VERSION = 6;
 
 /* ===== Presets ===== */
 const RSS_PRESETS = {
@@ -33,8 +31,7 @@ const RSS_PRESETS = {
     "https://www.reuters.com/markets/rss"
   ],
   uk: [
-    "https://feeds.bbci.co.uk/news/rss.xml",
-    "https://www.theguardian.com/uk-news/rss"
+    "https://news.google.com/rss?hl=en-GB&gl=GB&ceid=GB:en"
   ]
 };
 const STOCK_PRESETS = {
@@ -76,36 +73,15 @@ if (!fsBackdrop) {
   document.body.appendChild(fsBackdrop);
 }
 
-/* =================================================================
-   Preview cache + /api/preview helper (og:image, favicon) for RSS
-================================================================= */
-const PREVIEW_CACHE_KEY = "lifecre8.previewCache";
-let previewCache = {};
-try { previewCache = JSON.parse(localStorage.getItem(PREVIEW_CACHE_KEY) || "{}"); } catch {}
-const PREVIEW_TTL_MS = 24 * 60 * 60 * 1000; // 24h
-
-function previewCacheGet(url) {
-  const e = previewCache[url];
-  if (!e) return null;
-  if (Date.now() - e.ts > PREVIEW_TTL_MS) return null;
-  return e.data;
-}
-function previewCacheSet(url, data) {
-  previewCache[url] = { ts: Date.now(), data };
-  try { localStorage.setItem(PREVIEW_CACHE_KEY, JSON.stringify(previewCache)); } catch {}
-}
-async function getPreview(url) {
-  const cached = previewCacheGet(url);
-  if (cached) return cached;
-  const r = await fetch(`/api/preview?url=${encodeURIComponent(url)}`).then(r => r.json()).catch(()=>({}));
-  previewCacheSet(url, r);
-  return r;
-}
-
 /* -----------------------------
    YouTube helpers
 ----------------------------- */
-const YT_DEFAULTS = ["M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk"];
+const YT_DEFAULTS = [
+  "M7lc1UVf-VE",
+  "5qap5aO4i9A",
+  "DWcJFNfaw9c",
+  "jfKfPfyJRdk",
+];
 const ytEmbedSrc = (id) => `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
 function ytPlaylistMarkup(playlist, currentId) {
   const ids = (playlist && playlist.length) ? playlist : YT_DEFAULTS;
@@ -185,11 +161,9 @@ function spotifyMarkup(spotifyUrl) {
   `;
 }
 
-/* ============================================================
-   RSS tile (LIVE via /api/rss)   [ENRICHED WITH IMAGES]
-============================================================ */
-function escapeHTML(s){return (s||"").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-
+/* -----------------------------
+   RSS tile (LIVE via /api/rss)
+----------------------------- */
 function rssMarkup(items) {
   if (!items || !items.length) {
     return `
@@ -201,41 +175,22 @@ function rssMarkup(items) {
       </div>
     `;
   }
-
-  const list = items.map(i => {
-    const thumb = i.image || i.favicon || "";
-    const imgBlock = thumb
-      ? `<div style="flex:0 0 64px;height:64px;border-radius:10px;overflow:hidden;border:1px solid var(--border);background:#0a1522;display:grid;place-items:center">
-           <img src="${thumb}" alt="" style="width:100%;height:100%;object-fit:cover"/>
-         </div>`
-      : `<div style="flex:0 0 64px;height:64px;border-radius:10px;border:1px dashed var(--border);opacity:.35"></div>`;
-
-    const metaBits = [];
-    if (i.source) metaBits.push(`<span class="muted">${escapeHTML(i.source)}</span>`);
-    if (i.time)   metaBits.push(`<span class="muted"> · ${escapeHTML(i.time)}</span>`);
-
-    return `
-      <a href="${i.link}" target="_blank" rel="noopener"
-         style="display:flex;gap:12px;padding:10px;border:1px solid var(--border);border-radius:12px;background:rgba(0,0,0,.03);text-decoration:none;color:inherit">
-        ${imgBlock}
-        <div style="min-width:0;display:flex;flex-direction:column;gap:6px">
-          <div style="font-weight:650;line-height:1.3">${escapeHTML(i.title || '')}</div>
-          <div>${metaBits.join("")}</div>
-        </div>
-      </a>
-    `;
-  }).join("");
-
+  const list = items.map(i => `
+    <div class="rss-item">
+      ${i.image ? `<img src="${i.image}" alt="" style="width:100%;max-height:140px;object-fit:cover;border-radius:10px;margin-bottom:6px;border:1px solid var(--border)">` : ``}
+      <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
+      <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
+    </div>
+  `).join("");
   return `
     <div class="rss" data-rss>
-      <div class="rss-controls" style="margin-bottom:8px">
+      <div class="rss-controls">
         <button class="btn sm rss-refresh">Refresh</button>
       </div>
-      <div style="display:grid;gap:10px">${list}</div>
+      ${list}
     </div>
   `;
 }
-
 function rssErrorMarkup() {
   return `
     <div class="rss" data-rss>
@@ -246,38 +201,24 @@ function rssErrorMarkup() {
     </div>
   `;
 }
-
-async function loadRssInto(card, feeds, attempt=1) {
+function googleNewsFeedFor(topic) {
+  // UK locale feed for topic
+  return `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
+}
+function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
-
   const url = `/api/rss?url=${encodeURIComponent(feeds[0])}`;
-  try {
-    const data = await fetch(url).then(r=>r.json());
-    let items = (data.items||[]).slice(0,12);
-
-    // Enrich first 6 imageless items with OG/Twitter image via /api/preview (cached)
-    const toEnrich = items
-      .map((it, i) => ({ i, it }))
-      .filter(({ it }) => !it.image && it.link)
-      .slice(0, 6);
-
-    await Promise.allSettled(toEnrich.map(async ({ i, it }) => {
-      try {
-        const p = await getPreview(it.link);
-        if (p?.image) items[i] = { ...it, image: p.image, favicon: p.favicon };
-        else if (p?.favicon) items[i] = { ...it, favicon: p.favicon };
-      } catch {}
-    }));
-
+  fetch(url).then(r=>r.json()).then(data=>{
+    const items = (data.items||[]).slice(0,10);
     content.innerHTML = rssMarkup(items);
-  } catch {
+  }).catch(()=>{
     if (attempt < 2) {
       setTimeout(()=>loadRssInto(card, feeds, attempt+1), 1000);
     } else {
       content.innerHTML = rssErrorMarkup();
     }
-  }
+  });
 }
 
 /* -----------------------------
@@ -336,7 +277,7 @@ function loadQuotesInto(card, symbols) {
 }
 
 /* -----------------------------
-   Football (simulated)
+   Football (simulated fallback)
 ----------------------------- */
 function footballMarkupSeed() {
   const matches = [
@@ -353,6 +294,81 @@ function footballMarkupSeed() {
     </div>
   `).join("");
   return `<div class="scores" data-matches="${encodeURIComponent(JSON.stringify(matches))}">${rows}</div>`;
+}
+
+/* -----------------------------
+   Smart Tile (Wikipedia + Google News)
+----------------------------- */
+function smartTileLoading(topic) {
+  return `
+    <div class="smart" data-smart data-topic="${topic}">
+      <div class="muted">Loading info for “${topic}”…</div>
+    </div>
+  `;
+}
+function smartTileMarkup(topic, wiki, items) {
+  const thumb = wiki?.thumbnail?.source || "";
+  const desc  = wiki?.extract || "No summary available.";
+  const url   = wiki?.content_urls?.desktop?.page || (wiki?.canonicalurl || "");
+
+  const newsList = (items||[]).slice(0,5).map(i=>`
+    <div class="rss-item">
+      ${i.image ? `<img src="${i.image}" alt="" style="width:100%;max-height:120px;object-fit:cover;border-radius:10px;margin-bottom:6px;border:1px solid var(--border)">` : ``}
+      <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
+      <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
+    </div>
+  `).join("");
+
+  return `
+    <div class="smart" data-smart data-topic="${topic}">
+      <div class="row" style="gap:12px;align-items:flex-start;margin-bottom:10px">
+        ${thumb ? `<img src="${thumb}" alt="" style="width:84px;height:84px;object-fit:cover;border-radius:10px;border:1px solid var(--border)">` : ``}
+        <div style="flex:1 1 auto">
+          <div style="font-weight:700;margin-bottom:6px">${capitalize(topic)}</div>
+          <div class="muted" style="line-height:1.4">${desc}</div>
+          ${url ? `<div style="margin-top:6px"><a class="btn sm" href="${url}" target="_blank" rel="noopener">Read more on Wikipedia</a></div>` : ``}
+        </div>
+      </div>
+      <div style="margin:8px 0 6px;font-weight:700">Latest news</div>
+      <div class="rss">${newsList || `<div class="muted">No recent articles.</div>`}</div>
+    </div>
+  `;
+}
+async function fetchWiki(topic) {
+  // Try the REST summary first, fallback to older endpoint
+  const try1 = fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(topic)}`, {headers:{'accept':'application/json'}})
+    .then(r=>r.ok?r.json():Promise.reject());
+  try {
+    return await try1;
+  } catch {
+    try {
+      const r = await fetch(`https://en.wikipedia.org/w/api.php?action=query&prop=extracts|pageimages|info&explaintext=1&inprop=url&format=json&origin=*&pithumbsize=400&titles=${encodeURIComponent(topic)}`);
+      const j = await r.json();
+      const page = j?.query?.pages ? Object.values(j.query.pages)[0] : null;
+      if (!page) return null;
+      return {
+        extract: page.extract,
+        thumbnail: page.thumbnail ? { source: page.thumbnail.source } : null,
+        content_urls: { desktop: { page: page.fullurl } }
+      };
+    } catch { return null; }
+  }
+}
+async function buildSmartTile(card, topic) {
+  const content = card.querySelector(".content");
+  if (!content) return;
+  content.innerHTML = smartTileLoading(topic);
+
+  let wiki = null, newsItems = [];
+  try { wiki = await fetchWiki(topic); } catch {}
+  try {
+    const feedUrl = googleNewsFeedFor(topic);
+    const res = await fetch(`/api/rss?url=${encodeURIComponent(feedUrl)}`);
+    const data = await res.json();
+    newsItems = (data.items||[]).slice(0,8);
+  } catch {}
+
+  content.innerHTML = smartTileMarkup(topic, wiki, newsItems);
 }
 
 /* -----------------------------
@@ -419,6 +435,7 @@ function tileContentFor(section) {
     }
     case "stocks": return section.content;
     case "football": return section.content;
+    case "smart": return section.content; // will be hydrated
     default: return section.content || "Empty tile";
   }
 }
@@ -458,6 +475,17 @@ function render() {
 
   initDynamicTiles();
   initLiveFeeds();   // load live RSS + quotes
+  hydrateSmartTiles();
+}
+
+/* hydrate smart tiles after render */
+function hydrateSmartTiles(){
+  $$('.card[data-type="smart"]').forEach(card=>{
+    const id = card.dataset.id;
+    const s = sections.find(x=>x.id===id);
+    const topic = s?.meta?.topic;
+    if (topic) buildSmartTile(card, topic);
+  });
 }
 
 /* -----------------------------
@@ -574,6 +602,15 @@ function render() {
           </div>
         </div>
       `;
+    } else if (s.type === "smart") {
+      const topic = (s.meta?.topic || "").trim();
+      fields = `
+        <div class="field">
+          <label>Topic</label>
+          <input class="input" id="set_topic" value="${topic}">
+        </div>
+        <div class="muted">Smart tiles show a Wikipedia summary & related news for your topic.</div>
+      `;
     } else {
       fields = `<div class="muted">No settings for this tile.</div>`;
     }
@@ -627,6 +664,13 @@ function render() {
         const list = feeds.length? feeds : (s.meta?.feeds || RSS_PRESETS.uk);
         s.meta = {...(s.meta||{}), feeds: list};
         s.content = rssMarkup([]); // loading
+      } else if (s.type === "smart") {
+        const topic = ($("#set_topic")?.value || "").trim();
+        if (topic) {
+          s.meta = {...(s.meta||{}), topic };
+          s.title = capitalize(topic);
+          s.content = smartTileLoading(topic);
+        }
       }
       localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
       render();
@@ -846,52 +890,47 @@ function flashGoal(card, matchIdx, scoreText){
 }
 
 /* -----------------------------
-   Add Tile (smarter)
+   Add Tile
 ----------------------------- */
-
-// Build a Google News RSS feed for any query (region set to GB English)
-const gNewsFeed = (q) =>
-  `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`;
-
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
 const tileSearch = $("#tileSearch");
-
 addBtn.addEventListener("click", () => {
   tileMenu.classList.toggle("hidden");
   if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
 });
-
-tileSearch.addEventListener("keydown", (e)=>{
+tileSearch.addEventListener("keydown", async (e)=>{
   if (e.key === "Enter") {
-    const raw = tileSearch.value.trim();
-    if (!raw) return;
+    const val = tileSearch.value.trim();
+    if (!val) return;
 
-    const val = raw;
     let newTile = null;
+    let title   = null;
 
-    // 1) NEWS commands
-    // "news" => default UK preset
-    if (/^news$/i.test(val)) {
+    // === Intent routing ===
+    // 1) Special: football fixtures today -> Web tile to BBC fixtures (live)
+    if (/football/i.test(val) && /fixtures/i.test(val) && /today/i.test(val)) {
+      const url = "https://www.bbc.co.uk/sport/football/scores-fixtures";
+      newTile = { id: uid(), type:"web", title:"Football — Fixtures (Today)", meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+    }
+
+    // 2) News only → UK top news
+    if (!newTile && /^news$/i.test(val)) {
       const feeds = RSS_PRESETS.uk;
-      newTile = { id: uid(), type:"rss", title:`Daily Brief (UK)`, meta:{ feeds }, content: rssMarkup([]) };
-    }
-    // "news <topic>" => Google News feed for topic
-    const mNewsTopic = val.match(/^news\s+(.+)$/i);
-    if (!newTile && mNewsTopic) {
-      const topic = mNewsTopic[1].trim();
-      const feed  = gNewsFeed(topic);
-      newTile = { id: uid(), type:"rss", title: `News — ${topic.replace(/\b\w/g, m=>m.toUpperCase())}`, meta:{ feeds:[feed] }, content: rssMarkup([]) };
-    }
-    // Preset shortcuts (world/tech/finance/uk)
-    const cmdNewsPreset = val.match(/^news\s+(world|tech|finance|uk)$/i);
-    if (!newTile && cmdNewsPreset) {
-      const key = cmdNewsPreset[1].toLowerCase();
-      const feeds = RSS_PRESETS[key] || RSS_PRESETS.uk;
-      newTile = { id: uid(), type:"rss", title:`Daily Brief (${key})`, meta:{ feeds }, content: rssMarkup([]) };
+      newTile = { id: uid(), type:"rss", title:"Top News (UK)", meta:{ feeds }, content: rssMarkup([]) };
     }
 
-    // 2) YouTube (by url or "youtube <query>" -> starter playlist)
+    // 3) News + topic → Google News feed for topic
+    if (!newTile) {
+      const m = val.match(/^news\s+(.+)$/i);
+      if (m && m[1]) {
+        const topic = m[1].trim();
+        const feed = googleNewsFeedFor(topic);
+        newTile = { id: uid(), type:"rss", title:`News — ${capitalize(topic)}`, meta:{ feeds:[feed] }, content: rssMarkup([]) };
+      }
+    }
+
+    // 4) YouTube by URL or keyword "youtube ..."
     if (!newTile) {
       const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
       if (ytUrl) {
@@ -904,19 +943,19 @@ tileSearch.addEventListener("keydown", (e)=>{
       }
     }
 
-    // 3) Spotify
+    // 5) Spotify
     if (!newTile && /spotify/i.test(val)) {
       const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
       newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
     }
 
-    // 4) Stocks
+    // 6) Stocks
     if (!newTile && /stocks?|markets?/i.test(val)) {
       const symbols = ["AAPL","MSFT","BTC-USD"];
       newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
     }
 
-    // 5) Weather (stub)
+    // 7) Weather (stub)
     if (!newTile && /weather/i.test(val)) {
       const html = `
         <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
@@ -926,28 +965,25 @@ tileSearch.addEventListener("keydown", (e)=>{
       newTile = { id: uid(), type:"weather", title:"Weather", content: html };
     }
 
-    // 6) Football
-    if (!newTile && /(football|soccer|scores|prem|premier)/i.test(val)) {
-      newTile = { id: uid(), type:"football", title:"Football", content: footballMarkupSeed() };
-    }
-
-    // 7) URL -> Web tile (Preview default)
+    // 8) URL -> Web embed (Preview default)
     const isUrl = /^https?:\/\//i.test(val);
     if (!newTile && isUrl) {
       const url = val;
       newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
     }
 
-    // 8) Fallback: ANY free-text -> Google News tile for that topic
+    // 9) Fallback → SMART TILE (topic)
     if (!newTile) {
       const topic = val;
-      const feed  = gNewsFeed(topic);
-      newTile = { id: uid(), type:"rss", title: topic.replace(/\b\w/g, m=>m.toUpperCase()), meta:{ feeds:[feed] }, content: rssMarkup([]) };
+      title = capitalize(topic);
+      newTile = { id: uid(), type:"smart", title, meta:{ topic }, content: smartTileLoading(topic) };
     }
 
-    sections.push(newTile);
+    // === Prepend new tile to top-left ===
+    sections.unshift(newTile);
     localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
     render();
+
     tileMenu.classList.add("hidden");
     tileSearch.value = "";
   } else if (e.key === "Escape") {
@@ -1088,3 +1124,8 @@ document.addEventListener("DOMContentLoaded", () => {
   renderChat();
   render();
 });
+
+/* -----------------------------
+   Helpers
+----------------------------- */
+function capitalize(s){ return (s||"").replace(/\b\w/g, m=>m.toUpperCase()); }
