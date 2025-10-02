@@ -1,11 +1,6 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.10.0
-   - Builds on v1.9.3 (working baseline)
-   - Robust grid reflow (no overlap when assistant toggles / new tile)
-   - Smarter Add Tile router (NOT always news)
-   - RSS images via /api/rss?full=1
-   - AI Assistant + AI Search wiring (/api/ai-chat, /api/ai-search)
-   - New tiles PREPEND (top-left)
+   LifeCre8 — main.js  v1.9.4
+   Builds on v1.9.3
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -13,7 +8,7 @@ const K_SECTIONS   = "lifecre8.sections";
 const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
-const K_PREFS      = "lifecre8.prefs"; // theme, density
+const K_PREFS      = "lifecre8.prefs";
 const DATA_VERSION = 6;
 
 /* ===== Presets ===== */
@@ -32,7 +27,7 @@ const RSS_PRESETS = {
     "https://www.reuters.com/markets/rss",
   ],
   uk: [
-    "https://feeds.bbci.co.uk/news/rss.xml", // BBC first for thumbnails
+    "https://feeds.bbci.co.uk/news/rss.xml",
     "https://www.theguardian.com/uk-news/rss",
   ],
 };
@@ -50,16 +45,14 @@ let chat        = JSON.parse(localStorage.getItem(K_CHAT)      || "[]");
 if (!chat.length) chat = [{ role:'ai', text:"Hi! I'm your AI Assistant. Ask me anything." }];
 
 let prefs = JSON.parse(localStorage.getItem(K_PREFS) || "{}");
-if (!prefs.theme)   prefs.theme   = "solar";           // "solar" | "ice"
-if (!prefs.density) prefs.density = "comfortable";     // "comfortable" | "compact"
+if (!prefs.theme)   prefs.theme   = "solar";
+if (!prefs.density) prefs.density = "comfortable";
 document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
 document.body.classList.toggle('density-compact',  prefs.density === 'compact');
 
-/* timers for dynamic tiles */
 let dynamicTimers = {};
 let liveIntervals = {};
 
-/* ===== Utils ===== */
 const $  = q => document.querySelector(q);
 const $$ = q => Array.from(document.querySelectorAll(q));
 const uid = () => Math.random().toString(36).slice(2);
@@ -79,12 +72,7 @@ if (!fsBackdrop) {
 /* -----------------------------
    YouTube helpers
 ----------------------------- */
-const YT_DEFAULTS = [
-  "M7lc1UVf-VE",
-  "5qap5aO4i9A",
-  "DWcJFNfaw9c",
-  "jfKfPfyJRdk",
-];
+const YT_DEFAULTS = ["M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk"];
 const ytEmbedSrc = (id) => `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
 function ytPlaylistMarkup(playlist, currentId) {
   const ids = (playlist && playlist.length) ? playlist : YT_DEFAULTS;
@@ -206,26 +194,24 @@ function rssErrorMarkup() {
 function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
-
-  const url = `/api/rss?full=1&url=${encodeURIComponent(feeds[0])}`; // image-enriched
+  const url = `/api/rss?full=1&url=${encodeURIComponent(feeds[0])}`;
   fetch(url)
     .then(r=>r.json())
     .then(data=>{
       const items = (data.items||[]).slice(0,10);
       content.innerHTML = rssListMarkup(items);
-      deferRelayout();
     })
     .catch(()=>{
-      if (attempt < 2) setTimeout(()=>loadRssInto(card, feeds, attempt+1), 800);
-      else { content.innerHTML = rssErrorMarkup(); deferRelayout(); }
+      if (attempt < 2) setTimeout(()=>loadRssInto(card, feeds, attempt+1), 1000);
+      else content.innerHTML = rssErrorMarkup();
     });
 }
 
 /* -----------------------------
-   Gallery tile
+   Gallery tile (kept, not auto-created)
 ----------------------------- */
 function galleryMarkup(urls) {
-  const imgs = (urls || []).map(u => `<img src="${u}" alt="" onload="window.__relayout && window.__relayout()">`).join("");
+  const imgs = (urls || []).map(u => `<img src="${u}" alt="">`).join("");
   return `
     <div class="gallery-tile" data-gallery>
       <div class="gallery-view"><img alt=""></div>
@@ -402,28 +388,14 @@ function render() {
     grid.appendChild(card);
   });
 
+  // keep layout stable when assistant toggles or new items prepend
+  requestAnimationFrame(() => {
+    grid.style.minHeight = grid.scrollHeight + "px";
+  });
+
   initDynamicTiles();
   initLiveFeeds();
-  deferRelayout();
 }
-
-/* ---------- Grid reflow helpers (prevent overlap) ---------- */
-function relayout() {
-  // Force a reflow by toggling a style that doesn’t visually change layout.
-  const grid = $("#grid");
-  if (!grid) return;
-  grid.style.transform = "translateZ(0)";
-  // sync height to CSS variable so single-row glitch doesn’t happen
-  document.documentElement.style.setProperty('--_tick', String(Date.now()));
-  // ensure scrollbars settle
-  setTimeout(()=>{ grid.style.transform = ""; }, 0);
-}
-const deferRelayout = (() => {
-  let t; 
-  const fn = () => { clearTimeout(t); t = setTimeout(relayout, 60); };
-  window.__relayout = fn;
-  return fn;
-})();
 
 /* -----------------------------
    Delegated handlers
@@ -449,7 +421,6 @@ const deferRelayout = (() => {
       fsBackdrop.classList.add("show");
       btn.textContent = "Close";
     }
-    deferRelayout();
   });
 
   // Remove
@@ -481,64 +452,45 @@ const deferRelayout = (() => {
       const url = s.meta?.url || "";
       const mode = s.meta?.mode || "preview";
       fields = `
-        <div class="field">
-          <label>URL</label>
-          <input class="input" id="set_url" value="${url}">
-        </div>
+        <div class="field"><label>URL</label><input class="input" id="set_url" value="${url}"></div>
         <div class="field">
           <label>Mode</label>
           <select class="input" id="set_mode">
             <option value="preview" ${mode==='preview'?'selected':''}>Preview</option>
             <option value="embed" ${mode==='embed'?'selected':''}>Embed</option>
           </select>
-        </div>
-      `;
+        </div>`;
     } else if (s.type === "youtube") {
       const list = (s.meta?.playlist || YT_DEFAULTS).join(",");
-      fields = `
-        <div class="field">
-          <label>Playlist (comma-separated video IDs)</label>
-          <input class="input" id="set_playlist" value="${list}">
-        </div>
-      `;
+      fields = `<div class="field"><label>Playlist (IDs)</label><input class="input" id="set_playlist" value="${list}"></div>`;
     } else if (s.type === "stocks") {
       const syms = (s.meta?.symbols || ["AAPL","MSFT","BTC-USD"]).join(",");
-      const presetOptions = Object.keys(STOCK_PRESETS).map(name=>`<option value="${name}">${name}</option>`).join("");
+      const presetOptions = Object.keys(STOCK_PRESETS).map(n=>`<option value="${n}">${n}</option>`).join("");
       fields = `
-        <div class="field">
-          <label>Symbols (comma-separated)</label>
-          <input class="input" id="set_symbols" value="${syms}">
-        </div>
+        <div class="field"><label>Symbols (comma-separated)</label><input class="input" id="set_symbols" value="${syms}"></div>
         <div class="field">
           <label>Presets</label>
           <div class="row" style="gap:8px">
             <select class="input" id="set_symbols_preset" style="min-width:180px">
-              <option value="">Choose a preset…</option>
-              ${presetOptions}
+              <option value="">Choose a preset…</option>${presetOptions}
             </select>
             <button class="btn sm" id="apply_symbols_preset" type="button">Apply</button>
           </div>
-        </div>
-      `;
+        </div>`;
     } else if (s.type === "rss") {
       const feeds = (s.meta?.feeds || RSS_PRESETS.uk).join(",");
-      const presetOptions = Object.keys(RSS_PRESETS).map(key=>`<option value="${key}">${key.toUpperCase()}</option>`).join("");
+      const presetOptions = Object.keys(RSS_PRESETS).map(k=>`<option value="${k}">${k.toUpperCase()}</option>`).join("");
       fields = `
-        <div class="field">
-          <label>RSS feeds (comma-separated URLs; first is used)</label>
-          <input class="input" id="set_feeds" value="${feeds}">
-        </div>
+        <div class="field"><label>RSS feeds (first used)</label><input class="input" id="set_feeds" value="${feeds}"></div>
         <div class="field">
           <label>News Presets</label>
           <div class="row" style="gap:8px">
             <select class="input" id="set_feeds_preset" style="min-width:180px">
-              <option value="">Choose a preset…</option>
-              ${presetOptions}
+              <option value="">Choose a preset…</option>${presetOptions}
             </select>
             <button class="btn sm" id="apply_feeds_preset" type="button">Apply</button>
           </div>
-        </div>
-      `;
+        </div>`;
     } else {
       fields = `<div class="muted">No settings for this tile.</div>`;
     }
@@ -551,8 +503,7 @@ const deferRelayout = (() => {
           <button class="btn sm" data-action="cancel">Cancel</button>
           <button class="btn sm primary" data-action="save" id="settingsSaveBtn">Save</button>
         </div>
-      </div>
-    `;
+      </div>`;
     __openModal(html);
 
     $("#apply_symbols_preset")?.addEventListener("click", ()=>{
@@ -606,7 +557,6 @@ const deferRelayout = (() => {
     document.body.style.overflow = "";
     fsBackdrop.classList.remove("show");
     if (closeBtn) closeBtn.textContent = "⤢ Expand";
-    deferRelayout();
   });
 
   // Esc closes fullscreen
@@ -619,7 +569,6 @@ const deferRelayout = (() => {
       document.body.style.overflow = "";
       fsBackdrop.classList.remove("show");
       if (closeBtn) closeBtn.textContent = "⤢ Expand";
-      deferRelayout();
     }
   });
 
@@ -661,7 +610,7 @@ const deferRelayout = (() => {
     const s = sections.find(x => x.id === id);
     if (!s) return;
     const url = tile.dataset.url;
-    const nextMode = toggle.dataset.mode; // "embed" or "preview"
+    const nextMode = toggle.dataset.mode;
     s.meta = s.meta || {};
     s.meta.url = url;
     s.meta.mode = nextMode;
@@ -669,7 +618,6 @@ const deferRelayout = (() => {
     localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
     const content = card.querySelector(".content");
     if (content) content.innerHTML = s.content;
-    deferRelayout();
   });
 
   // RSS refresh (live)
@@ -706,16 +654,11 @@ const deferRelayout = (() => {
 /* -----------------------------
    Dynamic tiles & live feeds
 ----------------------------- */
-function stopDynamicTimers(){
-  Object.values(dynamicTimers).forEach(clearInterval);
-  dynamicTimers = {};
-}
-function stopLiveIntervals(){
-  Object.values(liveIntervals).forEach(clearInterval);
-  liveIntervals = {};
-}
+function stopDynamicTimers(){ Object.values(dynamicTimers).forEach(clearInterval); dynamicTimers = {}; }
+function stopLiveIntervals(){ Object.values(liveIntervals).forEach(clearInterval); liveIntervals = {}; }
+
 function initDynamicTiles(){
-  // Simulated football (visual heartbeat)
+  // Simulated football
   $$('.card[data-type="football"]').forEach(card=>{
     const container = card.querySelector(".scores");
     if (!container) return;
@@ -747,7 +690,7 @@ function initDynamicTiles(){
     dynamicTimers[card.dataset.id] = timer;
   });
 
-  // Simulated stocks as fallback (live overwrites on arrival)
+  // Stocks fallback animation (live feed overwrites)
   $$('.card[data-type="stocks"]').forEach(card=>{
     const ticker = card.querySelector(".ticker");
     if (!ticker) return;
@@ -762,6 +705,7 @@ function initDynamicTiles(){
     dynamicTimers[card.dataset.id] = timer;
   });
 }
+
 function initLiveFeeds(){
   // RSS (live)
   $$('.card[data-type="rss"]').forEach(card=>{
@@ -784,7 +728,7 @@ function initLiveFeeds(){
   });
 }
 
-/* stock fallbacks for simulation */
+/* stock fallbacks for animation */
 function seedPrice(sym){ if (sym.includes("BTC")) return 65000 + Math.random()*4000; if (sym.includes("ETH")) return 3200 + Math.random()*300; return 100 + Math.random()*100; }
 function stepPrice(p){ const drift = (Math.random()-0.5) * (p*0.004); return Math.max(0.01, p + drift); }
 function renderTicker(card, prices, prev){
@@ -813,7 +757,7 @@ function flashGoal(card, matchIdx, scoreText){
 }
 
 /* -----------------------------
-   Add Tile  (SMART ROUTER)
+   Add Tile — intent router
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
@@ -824,33 +768,37 @@ addBtn.addEventListener("click", () => {
   if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
 });
 
+function makeAndPrepend(tile){
+  sections.unshift(tile);
+  localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+  render();
+  tileMenu.classList.add("hidden");
+  tileSearch.value = "";
+  const grid = $("#grid");
+  grid?.scrollTo?.({top:0, behavior:"smooth"});
+}
+
 tileSearch.addEventListener("keydown", (e)=>{
-  if (e.key !== "Enter") {
-    if (e.key === "Escape") tileMenu.classList.add("hidden");
-    return;
-  }
+  if (e.key !== "Enter") { if (e.key === "Escape") tileMenu.classList.add("hidden"); return; }
 
   const valRaw = tileSearch.value.trim();
   if (!valRaw) return;
-
   const val = valRaw.replace(/\s+/g, " ");
-  let newTile = null;
 
-  // 1) NEWS exact or NEWS topic
+  // 1) News routes
   const mNews = val.match(/^news(?:\s+(.+))?$/i);
   if (mNews) {
     const topic = (mNews[1]||"").trim();
     if (!topic) {
-      const feeds = RSS_PRESETS.uk;
-      newTile = { id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() };
+      return makeAndPrepend({ id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds: RSS_PRESETS.uk }, content: rssLoadingMarkup() });
     } else {
       const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
-      newTile = { id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
+      return makeAndPrepend({ id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() });
     }
   }
 
-  // 2) Football fixtures today
-  if (!newTile && /(football|soccer).*(fixtures|today|scores)/i.test(val)) {
+  // 2) Football fixtures
+  if (/(football|soccer).*(fixtures|today|scores)/i.test(val)) {
     const fixUrl = "https://www.bbc.co.uk/sport/football/scores-fixtures";
     const html = `
       <div>
@@ -861,152 +809,83 @@ tileSearch.addEventListener("keydown", (e)=>{
           <a class="btn sm" href="${fixUrl}" target="_blank" rel="noopener">Open</a>
         </div>
       </div>`;
-    newTile = { id: uid(), type: "web", title: "Football — Fixtures (Today)", meta:{ url: fixUrl, mode:"preview" }, content: html };
+    const tile = { id: uid(), type: "web", title: "Football — Fixtures (Today)", meta:{ url: fixUrl, mode:"preview" }, content: html };
+    makeAndPrepend(tile);
     setTimeout(()=>{
-      const card = document.querySelector(`.card[data-id="${newTile.id}"]`);
+      const card = document.querySelector(`.card[data-id="${tile.id}"]`);
       const list = card?.querySelector('#fx-quick');
       if (!list) return;
       fetch(`/api/rss?url=${encodeURIComponent('https://feeds.bbci.co.uk/sport/football/rss.xml')}`)
         .then(r=>r.json()).then(data=>{
           const items = (data.items||[]).slice(0,5);
           list.innerHTML = items.map(i=>`<li><a href="${i.link}" target="_blank" rel="noopener">${i.title}</a></li>`).join("");
-          deferRelayout();
         })
         .catch(()=>{ list.innerHTML = `<li class="muted">Open for full fixtures →</li>`; });
     }, 80);
+    return;
   }
 
-  // 3) "for sale" / car model → AutoTrader
-  if (!newTile && /(for sale|price|buy)\b/i.test(val)) {
-    const q = encodeURIComponent(val.replace(/\b(for sale|buy|price)\b/ig,"").trim() || val);
-    const url = `https://www.autotrader.co.uk/car-search?keyword=${q}`;
-    newTile = { id: uid(), type:"web", title:`Marketplace — ${val}`, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+  // 3) for sale → shopping web tile
+  if (/for sale/i.test(val)) {
+    const url = `https://duckduckgo.com/?q=${encodeURIComponent(val)}&ia=shopping`;
+    return makeAndPrepend({ id: uid(), type:"web", title: val, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") });
   }
 
-  // 4) YouTube by URL or "youtube ..."
-  if (!newTile) {
-    const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
-    if (ytUrl) {
-      const videoId = ytUrl[1];
-      const playlist = [videoId, ...YT_DEFAULTS.filter(x=>x!==videoId)].slice(0,4);
-      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:videoId}, content: ytPlaylistMarkup(playlist, videoId) };
-    } else if (/^youtube\s+/i.test(val)) {
-      const playlist = [...YT_DEFAULTS];
-      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
-    }
+  // 4) YouTube
+  const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
+  if (ytUrl) {
+    const videoId = ytUrl[1];
+    const playlist = [videoId, ...YT_DEFAULTS.filter(x=>x!==videoId)].slice(0,4);
+    return makeAndPrepend({ id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:videoId}, content: ytPlaylistMarkup(playlist, videoId) });
+  }
+  if (/^youtube\s+/i.test(val)) {
+    const playlist = [...YT_DEFAULTS];
+    return makeAndPrepend({ id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) });
   }
 
-  // 5) Spotify keyword
-  if (!newTile && /spotify/i.test(val)) {
+  // 5) Spotify
+  if (/spotify/i.test(val)) {
     const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
-    newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
+    return makeAndPrepend({ id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) });
   }
 
-  // 6) Stocks keyword
-  if (!newTile && /stocks?|markets?/i.test(val)) {
+  // 6) Stocks
+  if (/stocks?|markets?/i.test(val)) {
     const symbols = ["AAPL","MSFT","BTC-USD"];
-    newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
+    return makeAndPrepend({ id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) });
   }
 
-  // 7) Weather (stub)
-  if (!newTile && /weather/i.test(val)) {
-    const html = `
-      <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
-      <div class="row" style="margin-top:8px">
-        <div>🌤️</div><div class="muted">Partly cloudy</div><div>18°C</div>
-      </div>`;
-    newTile = { id: uid(), type:"weather", title:"Weather", content: html };
-  }
-
-  // 8) URL -> Web embed (Preview default)
-  const isUrl = /^https?:\/\//i.test(val);
-  if (!newTile && isUrl) {
+  // 7) URL → Web
+  if (/^https?:\/\//i.test(val)) {
     const url = val;
-    newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+    return makeAndPrepend({ id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") });
   }
 
-  // 9) Generic topic => AI (optional) else Smart Web + optional gallery
-  if (!newTile) {
-    fetch(`/api/ai-search?q=${encodeURIComponent(val)}`, { method:"GET" })
-      .then(r=>{
-        if (!r.ok) throw new Error("ai-search not available");
-        return r.json();
-      })
-      .then(plan=>{
-        const tiles = (plan && plan.tiles) || [];
-        const made = tiles.map(t => {
-          if (t.type === "rss" && t.feeds?.length) {
-            return { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
-          }
-          if (t.type === "web" && t.url) {
-            return { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
-          }
-          if (t.type === "youtube" && t.playlist?.length) {
-            const cur = t.playlist[0];
-            return { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
-          }
-          if (t.type === "stocks" && t.symbols?.length) {
-            return { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
-          }
-          if (t.type === "gallery" && t.images?.length) {
-            return { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
-          }
-          return null;
-        }).filter(Boolean);
-
-        if (made.length) {
-          for (let i = made.length - 1; i >= 0; i--) sections.unshift(made[i]);
-          localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-          render();
-          tileMenu.classList.add("hidden");
-          tileSearch.value = "";
-          return;
-        }
-        throw new Error("empty plan");
-      })
-      .catch(()=>{
-        // Single smart web tile (DuckDuckGo results page)
-        const ddg = `https://duckduckgo.com/?q=${encodeURIComponent(val)}&ia=web`;
-        const a = { id: uid(), type:"web", title:`${val} — Web`, meta:{ url: ddg, mode:"preview" }, content: webTileMarkup(ddg, "preview") };
-        sections.unshift(a);
-        localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-        render();
-        tileMenu.classList.add("hidden");
-        tileSearch.value = "";
-      });
-
-    return; // async branch handles persistence
-  }
-
-  // Persist & render for synchronous branches
-  sections.unshift(newTile); // PREPEND (top-left)
-  localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-  render();
-  tileMenu.classList.add("hidden");
-  tileSearch.value = "";
+  // 8) Generic topic → single smart news tile (with images)
+  const gn = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
+  const smartTitle = `Daily Brief — ${val}`;
+  const tile = { id: uid(), type:"rss", title: smartTitle, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
+  makeAndPrepend(tile);
 });
 
 /* -----------------------------
-   Assistant Toggle & Chat (AI)
+   Assistant Toggle & Chat
 ----------------------------- */
 const assistantToggle = $("#assistantToggle");
 const assistantPanel  = $("#assistantPanel");
 const chatLog   = $("#assistantChat");
 const chatForm  = $("#chatForm");
 const chatInput = $("#chatInput");
-
 function updateAssistant() {
   assistantPanel.style.display = assistantOn ? "block" : "none";
   assistantToggle.classList.toggle("primary", assistantOn);
   appEl.classList.toggle("no-right", !assistantOn);
   localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
-  deferRelayout();
 }
 assistantToggle.addEventListener("click", () => {
   assistantOn = !assistantOn;
   updateAssistant();
 });
-
 function renderChat(){
   chatLog.innerHTML = "";
   chat.forEach(m=>{
@@ -1022,35 +901,18 @@ function addChat(role, text){
   localStorage.setItem(K_CHAT, JSON.stringify(chat));
   renderChat();
 }
-
-async function aiChat(prompt){
-  try{
-    const r = await fetch("/api/ai-chat", {
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({ prompt })
-    });
-    if (!r.ok) throw new Error("ai disabled");
-    const j = await r.json();
-    return j.reply || "(No reply)";
-  }catch{
-    // local echo fallback
-    return `You said: “${prompt}”. (Local stub)`;
-  }
-}
-
-chatForm.addEventListener("submit", async (e)=>{
+function fakeAIResponse(text){ return `You said: “${text}”. (Local stub)`; }
+chatForm.addEventListener("submit", (e)=>{
   e.preventDefault();
   const text = chatInput.value.trim();
   if (!text) return;
   addChat('user', text);
   chatInput.value = "";
-  const reply = await aiChat(text);
-  addChat('ai', reply);
+  setTimeout(()=> addChat('ai', fakeAIResponse(text)), 250);
 });
 
 /* -----------------------------
-   Global settings (Theme + Density)
+   Global settings
 ----------------------------- */
 $("#globalSettingsBtn").addEventListener("click", ()=>{
   const html = `
@@ -1074,8 +936,7 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
         <button class="btn sm" data-action="cancel">Cancel</button>
         <button class="btn sm primary" data-action="save" id="g_save">Save</button>
       </div>
-    </div>
-  `;
+    </div>`;
   __openModal(html);
   $("#g_save")?.addEventListener("click", ()=>{
     const theme = $("#g_theme").value;
@@ -1085,58 +946,41 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
     document.body.classList.toggle('theme-ice', theme === 'ice');
     document.body.classList.toggle('density-compact', density === 'compact');
     __closeModal();
-    deferRelayout();
   }, { once:true });
 });
 
 /* -----------------------------
-   Modal close safety net
+   Modal safety
 ----------------------------- */
 (function modalSafetyNet(){
   const modal = document.getElementById('modal');
   const backdrop = document.getElementById('fsBackdrop');
-
-  function isOpen() {
-    return modal && !modal.classList.contains('hidden') && modal.classList.contains('show');
-  }
+  function isOpen(){ return modal && !modal.classList.contains('hidden') && modal.classList.contains('show'); }
   window.__openModal = window.__openModal || function(html){
-    if (!modal) return;
-    modal.innerHTML = html || modal.innerHTML;
-    modal.classList.remove('hidden');
-    modal.classList.add('show');
-    document.body.style.overflow = 'hidden';
-    if (backdrop) backdrop.classList.remove('show');
+    if (!modal) return; modal.innerHTML = html || modal.innerHTML;
+    modal.classList.remove('hidden'); modal.classList.add('show');
+    document.body.style.overflow = 'hidden'; if (backdrop) backdrop.classList.remove('show');
   };
   window.__closeModal = window.__closeModal || function(){
-    if (!modal) return;
-    modal.classList.add('hidden');
-    modal.classList.remove('show');
-    modal.innerHTML = '';
-    document.body.style.overflow = '';
-    if (backdrop) backdrop.classList.remove('show');
-    deferRelayout();
+    if (!modal) return; modal.classList.add('hidden'); modal.classList.remove('show');
+    modal.innerHTML = ''; document.body.style.overflow = ''; if (backdrop) backdrop.classList.remove('show');
   };
-
   if (modal) {
-    modal.addEventListener('click', (e)=>{
-      if (e.target === modal) window.__closeModal();
-    });
+    modal.addEventListener('click', (e)=>{ if (e.target === modal) window.__closeModal(); });
     modal.addEventListener('click', (e)=>{
       const closeBtn = e.target.closest('[data-action="close"],[data-action="cancel"],[data-action="dismiss"]');
       const saveBtn  = e.target.closest('[data-action="save"],[data-action="ok"],[data-action="apply"]');
       if (closeBtn || saveBtn) window.__closeModal();
     });
   }
-  document.addEventListener('keydown', (e)=>{
-    if (e.key === 'Escape' && isOpen()) window.__closeModal();
-  });
+  document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape' && isOpen()) window.__closeModal(); });
 })();
 
 /* -----------------------------
    Init
 ----------------------------- */
 document.addEventListener("DOMContentLoaded", () => {
-  $("#yr").textContent = new Date().getFullYear();
+  $("#yr")?.textContent = new Date().getFullYear();
   ensureVersion();
   updateAssistant();
   renderChat();
