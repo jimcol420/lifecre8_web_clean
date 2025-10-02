@@ -1,10 +1,15 @@
 /* ============================================================
    LifeCre8 — main.js  v1.9.4
    - Builds on v1.9.3 (stable baseline)
-   - Smarter Add Tile (news/topic/football/etc.)
-   - Daily Brief images via /api/rss?full=1 (resilient thumbs)
+   - Smarter Add Tile:
+       • "news" => BBC UK feed with images
+       • "news <topic>" => Google News RSS (server enrich: full=1)
+       • "football fixtures today" => BBC fixtures + quick snapshot
+       • "<thing> for sale" / "buy <thing>" => For-Sale web tile
+       • generic queries => single RSS tile (no extra gallery)
+   - Daily Brief images via /api/rss?full=1
    - New tiles prepend (top-left)
-   - Layout-safe AI toggle (pairs with CSS .app.no-right .right{display:none})
+   - Assistant toggle triggers re-render to keep grid aligned
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -31,8 +36,7 @@ const RSS_PRESETS = {
     "https://www.reuters.com/markets/rss",
   ],
   uk: [
-    // Bias BBC first for consistent images/titles
-    "https://feeds.bbci.co.uk/news/rss.xml",
+    "https://feeds.bbci.co.uk/news/rss.xml",           // BBC first (good thumbs)
     "https://www.theguardian.com/uk-news/rss",
   ],
 };
@@ -115,7 +119,7 @@ function ytPlaylistMarkup(playlist, currentId) {
 /* -----------------------------
    Web tile
 ----------------------------- */
-function webTileMarkup(url, mode = "preview") {
+function webTileMarkup(url, mode = "preview", extraActionsHTML = "") {
   const host = hostOf(url);
   const favicon = host ? `https://www.google.com/s2/favicons?domain=${host}&sz=32` : "";
   if (mode === "embed") {
@@ -124,6 +128,7 @@ function webTileMarkup(url, mode = "preview") {
         <div class="web-actions">
           <button class="btn sm web-toggle" data-mode="preview">Preview</button>
           <a class="btn sm" href="${url}" target="_blank" rel="noopener">Open</a>
+          ${extraActionsHTML||""}
         </div>
         <iframe src="${url}" style="width:100%;height:300px;border:0;border-radius:10px;background:#0a1522"></iframe>
         <div class="muted">If this is blank, the site likely blocks iframes. Use Preview/Open.</div>
@@ -143,6 +148,7 @@ function webTileMarkup(url, mode = "preview") {
         <div class="web-actions">
           <button class="btn sm web-toggle" data-mode="embed">Embed</button>
           <a class="btn sm" href="${url}" target="_blank" rel="noopener">Open</a>
+          ${extraActionsHTML||""}
         </div>
         <div class="muted" style="margin-top:6px">Preview mode avoids iframe blocks. Try Embed; if it fails, use Open.</div>
       </div>
@@ -168,24 +174,16 @@ function spotifyMarkup(spotifyUrl) {
    RSS tile (LIVE via /api/rss)
 ----------------------------- */
 function rssListMarkup(items) {
-  const list = (items || []).map(i => {
-    const thumb = i.image || i.thumbnail || (i.enclosure && i.enclosure.url) || "";
-    const safeImg = thumb ? `
-      <img src="${thumb}"
-           alt=""
-           referrerpolicy="no-referrer"
-           onerror="this.style.display='none'"
-           style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--border)" />`
-      : `<div style="width:56px;height:56px;border-radius:8px;border:1px solid var(--border);background:#0a1522"></div>`;
-    return `
-      <div class="rss-item" style="display:flex; gap:10px; align-items:flex-start;">
-        ${safeImg}
-        <div>
-          <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
-          <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
-        </div>
-      </div>`;
-  }).join("");
+  const list = (items || []).map(i => `
+    <div class="rss-item" style="display:flex; gap:10px; align-items:flex-start;">
+      ${i.image ? `<img src="${i.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--border)" />`
+                 : `<div style="width:56px;height:56px;border-radius:8px;border:1px solid var(--border);background:#0a1522"></div>`}
+      <div>
+        <a href="${i.link}" target="_blank" rel="noopener" style="color:var(--text)">${i.title}</a>
+        <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
+      </div>
+    </div>
+  `).join("");
   return `
     <div class="rss" data-rss>
       <div class="rss-controls">
@@ -195,7 +193,6 @@ function rssListMarkup(items) {
     </div>
   `;
 }
-
 function rssLoadingMarkup() {
   return `
     <div class="rss" data-rss>
@@ -358,7 +355,8 @@ function tileContentFor(section) {
     case "web": {
       const url = section.meta?.url || "https://example.com";
       const mode = section.meta?.mode || "preview";
-      return webTileMarkup(url, mode);
+      const extra = section.meta?.extraActionsHTML || "";
+      return webTileMarkup(url, mode, extra);
     }
     case "spotify": {
       const url = section.meta?.url || "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
@@ -411,7 +409,7 @@ function render() {
   });
 
   initDynamicTiles();
-  initLiveFeeds();   // load live RSS + quotes
+  initLiveFeeds();
 }
 
 /* -----------------------------
@@ -564,7 +562,7 @@ function render() {
         const url = $("#set_url")?.value?.trim() || s.meta?.url || "";
         const mode = $("#set_mode")?.value || "preview";
         s.meta = {...(s.meta||{}), url, mode};
-        s.content = webTileMarkup(url, mode);
+        s.content = webTileMarkup(url, mode, s.meta?.extraActionsHTML||"");
       } else if (s.type === "youtube") {
         const playlist = ($("#set_playlist")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
         const list = playlist.length? playlist : (s.meta?.playlist || YT_DEFAULTS);
@@ -654,7 +652,7 @@ function render() {
     s.meta = s.meta || {};
     s.meta.url = url;
     s.meta.mode = nextMode;
-    s.content = webTileMarkup(url, nextMode);
+    s.content = webTileMarkup(url, nextMode, s.meta?.extraActionsHTML||"");
     localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
     const content = card.querySelector(".content");
     if (content) content.innerHTML = s.content;
@@ -801,7 +799,7 @@ function flashGoal(card, matchIdx, scoreText){
 }
 
 /* -----------------------------
-   Add Tile
+   Add Tile (smarter)
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
@@ -811,6 +809,15 @@ addBtn.addEventListener("click", () => {
   tileMenu.classList.toggle("hidden");
   if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
 });
+
+function buildForSaleExtraActions(q) {
+  const ebay = `https://www.ebay.co.uk/sch/i.html?_nkw=${encodeURIComponent(q)}`;
+  return `<a class="btn sm" href="${ebay}" target="_blank" rel="noopener">Open eBay</a>`;
+}
+function buildForSalePrimaryUrl(q) {
+  // Auto Trader UK search
+  return `https://www.autotrader.co.uk/car-search?sort=relevance&postcode=SW1A1AA&radius=1500&keywords=${encodeURIComponent(q)}`;
+}
 
 tileSearch.addEventListener("keydown", (e)=>{
   if (e.key !== "Enter") {
@@ -832,7 +839,6 @@ tileSearch.addEventListener("keydown", (e)=>{
       const feeds = RSS_PRESETS.uk;
       newTile = { id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() };
     } else {
-      // Topic feed (use Google News RSS; backend enriches images with full=1)
       const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
       newTile = { id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
     }
@@ -859,13 +865,27 @@ tileSearch.addEventListener("keydown", (e)=>{
       fetch(`/api/rss?url=${encodeURIComponent('https://feeds.bbci.co.uk/sport/football/rss.xml')}`)
         .then(r=>r.json()).then(data=>{
           const items = (data.items||[]).slice(0,5);
-          list.innerHTML = items.map(i=>`<li><a href="${i.link}" target="_blank" rel="noopener">${i.title}</a></li>`).join("");
+          list.innerHTML = items.map(i=>`<li><a href="${i.link}" target="_blank" rel="noopener" style="color:var(--text)">${i.title}</a></li>`).join("");
         })
         .catch(()=>{ list.innerHTML = `<li class="muted">Open for full fixtures →</li>`; });
     }, 80);
   }
 
-  // 3) YouTube by URL or "youtube ..."
+  // 3) For sale / buy ...
+  if (!newTile && /(for sale|buy|to buy)/i.test(val)) {
+    const q = val.replace(/^(for sale|buy)\s+/i, "").trim() || val;
+    const url = buildForSalePrimaryUrl(q);
+    const extra = buildForSaleExtraActions(q);
+    newTile = {
+      id: uid(),
+      type: "web",
+      title: `For Sale — ${q}`,
+      meta: { url, mode: "preview", extraActionsHTML: extra },
+      content: webTileMarkup(url, "preview", extra)
+    };
+  }
+
+  // 4) YouTube
   if (!newTile) {
     const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
     if (ytUrl) {
@@ -878,19 +898,19 @@ tileSearch.addEventListener("keydown", (e)=>{
     }
   }
 
-  // 4) Spotify keyword
+  // 5) Spotify
   if (!newTile && /spotify/i.test(val)) {
     const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
     newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
   }
 
-  // 5) Stocks keyword
+  // 6) Stocks
   if (!newTile && /stocks?|markets?/i.test(val)) {
     const symbols = ["AAPL","MSFT","BTC-USD"];
     newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
   }
 
-  // 6) Weather (stub)
+  // 7) Weather (stub)
   if (!newTile && /weather/i.test(val)) {
     const html = `
       <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
@@ -900,75 +920,21 @@ tileSearch.addEventListener("keydown", (e)=>{
     newTile = { id: uid(), type:"weather", title:"Weather", content: html };
   }
 
-  // 7) URL -> Web embed (Preview default)
+  // 8) URL -> Web embed (Preview default)
   const isUrl = /^https?:\/\//i.test(val);
   if (!newTile && isUrl) {
     const url = val;
     newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
   }
 
-  // 8) Generic topic => AI (optional) or RSS + Gallery
+  // 9) Generic topic => single RSS tile (images via full=1)
   if (!newTile) {
-    // Try optional AI endpoint
-    fetch(`/api/ai-search?q=${encodeURIComponent(val)}`, { method:"GET" })
-      .then(r=>{
-        if (!r.ok) throw new Error("ai-search not available");
-        return r.json();
-      })
-      .then(plan=>{
-        const tiles = plan.tiles || [];
-        const made = tiles.map(t => {
-          if (t.type === "rss" && t.feeds?.length) {
-            return { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
-          }
-          if (t.type === "web" && t.url) {
-            return { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
-          }
-          if (t.type === "youtube" && t.playlist?.length) {
-            const cur = t.playlist[0];
-            return { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
-          }
-          if (t.type === "stocks" && t.symbols?.length) {
-            return { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
-          }
-          if (t.type === "gallery" && t.images?.length) {
-            return { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
-          }
-          return null;
-        }).filter(Boolean);
-
-        if (made.length) {
-          for (let i = made.length - 1; i >= 0; i--) {
-            sections.unshift(made[i]);
-          }
-          localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-          render();
-          tileMenu.classList.add("hidden");
-          tileSearch.value = "";
-          return;
-        }
-        throw new Error("ai-search empty plan");
-      })
-      .catch(()=>{
-        // Fallback: Topic RSS + Visual gallery
-        const gn = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
-        const img = (n)=>`https://source.unsplash.com/600x600/?${encodeURIComponent(val)}&sig=${n}`;
-        const gal = [img(1),img(2),img(3),img(4),img(5),img(6)];
-        const a = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
-        const b = { id: uid(), type:"gallery", title:`${val} — Gallery`, meta:{ urls: gal }, content: galleryMarkup(gal) };
-        sections.unshift(b);
-        sections.unshift(a);
-        localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-        render();
-        tileMenu.classList.add("hidden");
-        tileSearch.value = "";
-      });
-
-    return; // async branch handles persistence/render
+    const gn = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
+    newTile = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
   }
 
-  // Persist & render for synchronous branches
-  sections.unshift(newTile); // PREPEND
+  // Persist & render (prepend)
+  sections.unshift(newTile);
   localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
   render();
   tileMenu.classList.add("hidden");
@@ -986,8 +952,10 @@ const chatInput = $("#chatInput");
 function updateAssistant() {
   assistantPanel.style.display = assistantOn ? "block" : "none";
   assistantToggle.classList.toggle("primary", assistantOn);
-  appEl.classList.toggle("no-right", !assistantOn);   // works with CSS to remove panel from layout
+  appEl.classList.toggle("no-right", !assistantOn);
   localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
+  // re-render to keep grid aligned when panel width changes
+  setTimeout(render, 0);
 }
 assistantToggle.addEventListener("click", () => {
   assistantOn = !assistantOn;
