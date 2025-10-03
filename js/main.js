@@ -1,13 +1,10 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.6
-   Built on: v1.9.5 (stable)
-   What’s new (small, safe):
-   - Travel intent for Add Tile:
-     • queries like "retreat", "spa", "resort", "hotel", "airbnb",
-       "yoga retreat", "in <city>", "near me", etc.
-     • Creates a Google Maps tile (embedded) with quick links
-       to Maps, Booking, and Tripadvisor.
-   - Everything else unchanged from v1.9.5
+   LifeCre8 — main.js  v1.9.7
+   Built on: v1.9.6 (stable)
+   What’s new:
+   - Add Tile now asks /api/ai-plan FIRST and creates EXACTLY ONE tile.
+   - If AI is unavailable/unsure, we gracefully fall back to the old logic.
+   - Guardrails: never spawn multiple tiles from one query.
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -38,6 +35,7 @@ const RSS_PRESETS = {
     "https://www.theguardian.com/uk-news/rss",
   ],
 };
+
 const STOCK_PRESETS = {
   "Tech Giants": ["AAPL","MSFT","GOOGL","AMZN","NVDA"],
   "Crypto": ["BTC-USD","ETH-USD","SOL-USD"],
@@ -56,7 +54,6 @@ if (!prefs.density) prefs.density = "comfortable";
 document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
 document.body.classList.toggle('density-compact',  prefs.density === 'compact');
 
-/* timers */
 let dynamicTimers = {};
 let liveIntervals = {};
 
@@ -80,7 +77,9 @@ if (!fsBackdrop) {
 /* -----------------------------
    YouTube helpers
 ----------------------------- */
-const YT_DEFAULTS = ["M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk"];
+const YT_DEFAULTS = [
+  "M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk",
+];
 const ytEmbedSrc = (id) => `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
 function ytPlaylistMarkup(playlist, currentId) {
   const ids = (playlist && playlist.length) ? playlist : YT_DEFAULTS;
@@ -147,7 +146,7 @@ function webTileMarkup(url, mode = "preview") {
 }
 
 /* -----------------------------
-   Maps tile (new travel intent)
+   Maps tile (travel intent)
 ----------------------------- */
 function mapsTileMarkup(query){
   const embed = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
@@ -813,7 +812,7 @@ function renderTicker(card, prices, prev){
 }
 
 /* -----------------------------
-   Add Tile
+   Add Tile — NOW AI-FIRST (ONE TILE ONLY)
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
@@ -833,162 +832,134 @@ tileSearch.addEventListener("keydown", (e)=>{
   const valRaw = tileSearch.value.trim();
   if (!valRaw) return;
   const val = valRaw.replace(/\s+/g, " ");
-  let newTile = null;
 
-  /* --- NEW: travel intent ---> Maps tile --- */
-  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break)/i;
-  const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
-  if (TRAVEL_RE.test(val) || GEO_HINT.test(val)) {
-    const q = val.replace(/\bnear me\b/i, "near me");
-    newTile = {
-      id: uid(),
-      type: "maps",
-      title: `Search — ${val}`,
-      meta: { q },
-      content: mapsTileMarkup(q)
-    };
-  }
+  // 0) AI-FIRST planning (one tile only)
+  (async ()=>{
+    try {
+      const r = await fetch(`/api/ai-plan?q=${encodeURIComponent(val)}`);
+      if (!r.ok) throw new Error('ai-plan unavailable');
+      const data = await r.json();
+      const t = data.tile || null;
 
-  // Quick commands: news / topic
-  if (!newTile) {
-    const mNews = val.match(/^news(?:\s+(.+))?$/i);
-    if (mNews) {
-      const topic = (mNews[1]||"").trim();
-      if (!topic) {
-        const feeds = RSS_PRESETS.uk;
-        newTile = { id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() };
-      } else {
-        const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
-        newTile = { id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
-      }
-    }
-  }
-
-  // Football fixtures today
-  if (!newTile && /(football|soccer).*(fixtures|today|scores)/i.test(val)) {
-    const fixUrl = "https://www.bbc.co.uk/sport/football/scores-fixtures";
-    const html = `
-      <div>
-        <div class="muted">Quick fixtures snapshot — open BBC for full details.</div>
-        <ul id="fx-quick" style="margin:8px 0 12px; display:grid; gap:6px;"></ul>
-        <div class="web-actions">
-          <button class="btn sm web-toggle" data-mode="embed">Embed</button>
-          <a class="btn sm" href="${fixUrl}" target="_blank" rel="noopener">Open</a>
-        </div>
-      </div>`;
-    newTile = { id: uid(), type: "web", title: "Football — Fixtures (Today)", meta:{ url: fixUrl, mode:"preview" }, content: html };
-    // async snapshot
-    setTimeout(()=>{
-      const card = document.querySelector(`.card[data-id="${newTile.id}"]`);
-      const list = card?.querySelector('#fx-quick');
-      if (!list) return;
-      fetch(`/api/rss?url=${encodeURIComponent('https://feeds.bbci.co.uk/sport/football/rss.xml')}`)
-        .then(r=>r.json()).then(data=>{
-          const items = (data.items||[]).slice(0,5);
-          list.innerHTML = items.map(i=>`<li><a href="${i.link}" target="_blank" rel="noopener">${i.title}</a></li>`).join("");
-        })
-        .catch(()=>{ list.innerHTML = `<li class="muted">Open for full fixtures →</li>`; });
-    }, 80);
-  }
-
-  // YouTube
-  if (!newTile) {
-    const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
-    if (ytUrl) {
-      const videoId = ytUrl[1];
-      const playlist = [videoId, ...YT_DEFAULTS.filter(x=>x!==videoId)].slice(0,4);
-      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:videoId}, content: ytPlaylistMarkup(playlist, videoId) };
-    } else if (/^youtube\s+/i.test(val)) {
-      const playlist = [...YT_DEFAULTS];
-      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
-    }
-  }
-
-  // Spotify
-  if (!newTile && /spotify/i.test(val)) {
-    const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
-    newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
-  }
-
-  // Stocks
-  if (!newTile && /stocks?|markets?/i.test(val)) {
-    const symbols = ["AAPL","MSFT","BTC-USD"];
-    newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
-  }
-
-  // Weather (stub)
-  if (!newTile && /weather/i.test(val)) {
-    const html = `
-      <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
-      <div class="row" style="margin-top:8px">
-        <div>🌤️</div><div class="muted">Partly cloudy</div><div>18°C</div>
-      </div>`;
-    newTile = { id: uid(), type:"weather", title:"Weather", content: html };
-  }
-
-  // URL -> Web
-  const isUrl = /^https?:\/\//i.test(val);
-  if (!newTile && isUrl) {
-    const url = val;
-    newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
-  }
-
-  // Generic topic -> AI/News+Gallery fallback
-  if (!newTile) {
-    fetch(`/api/ai-search?q=${encodeURIComponent(val)}`, { method:"GET" })
-      .then(r=>{ if (!r.ok) throw new Error("ai-search not available"); return r.json(); })
-      .then(plan=>{
-        const tiles = (plan.tiles||[]).map(t=>{
-          if (t.type === "rss" && t.feeds?.length)
-            return { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
-          if (t.type === "web" && t.url)
-            return { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
-          if (t.type === "youtube" && t.playlist?.length) {
-            const cur = t.playlist[0];
-            return { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
-          }
-          if (t.type === "stocks" && t.symbols?.length)
-            return { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
-          if (t.type === "gallery" && t.images?.length)
-            return { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
-          if (t.type === "maps" && t.q)
-            return { id: uid(), type:"maps", title: t.title || `Search — ${t.q}`, meta:{ q: t.q }, content: mapsTileMarkup(t.q) };
-          return null;
-        }).filter(Boolean);
-
-        if (tiles.length) {
-          for (let i = tiles.length - 1; i >= 0; i--) sections.unshift(tiles[i]);
-          localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-          render();
-          tileMenu.classList.add("hidden");
-          tileSearch.value = "";
-          return;
+      // Build exactly ONE tile from plan
+      let newTile = null;
+      if (t) {
+        switch (t.type) {
+          case 'web':
+            if (t.url) newTile = { id: uid(), type:'web', title: t.title || `Web — ${val}`, meta:{ url: t.url, mode:'preview' }, content: webTileMarkup(t.url,'preview') };
+            break;
+          case 'maps':
+            if (t.q) newTile = { id: uid(), type:'maps', title: t.title || `Map — ${val}`, meta:{ q: t.q }, content: mapsTileMarkup(t.q) };
+            break;
+          case 'rss':
+            if (t.feeds?.length) newTile = { id: uid(), type:'rss', title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
+            break;
+          case 'youtube':
+            if (t.playlist?.length) {
+              const cur = t.playlist[0];
+              newTile = { id: uid(), type:'youtube', title: t.title || 'YouTube', meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
+            }
+            break;
+          case 'stocks':
+            if (t.symbols?.length) newTile = { id: uid(), type:'stocks', title: t.title || 'Markets', meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
+            break;
+          case 'gallery':
+            if (t.images?.length) newTile = { id: uid(), type:'gallery', title: t.title || `Gallery — ${val}`, meta:{ urls: t.images }, content: galleryMarkup(t.images) };
+            break;
+          case 'spotify':
+            if (t.spotifyUrl) newTile = { id: uid(), type:'spotify', title: t.title || 'Spotify', meta:{ url: t.spotifyUrl }, content: spotifyMarkup(t.spotifyUrl) };
+            break;
         }
-        throw new Error("ai-search empty plan");
-      })
-      .catch(()=>{
-        // fallback: RSS + Gallery visuals
-        const gn = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
-        const img = (n)=>`https://source.unsplash.com/600x600/?${encodeURIComponent(val)}&sig=${n}`;
-        const gal = [img(1),img(2),img(3),img(4),img(5),img(6)];
-        const a = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
-        const b = { id: uid(), type:"gallery", title:`${val} — Gallery`, meta:{ urls: gal }, content: galleryMarkup(gal) };
-        sections.unshift(b);
-        sections.unshift(a);
+      }
+
+      if (newTile) {
+        sections.unshift(newTile);  // PREPEND (top-left)
         localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
         render();
         tileMenu.classList.add("hidden");
         tileSearch.value = "";
-      });
-    return; // async path handles persistence + render
-  }
+        return;
+      }
 
-  // sync branches
-  sections.unshift(newTile);
-  localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-  render();
-  tileMenu.classList.add("hidden");
-  tileSearch.value = "";
+      throw new Error('ai-plan returned unusable plan');
+    } catch {
+      // 1) Graceful fallback — old logic (trimmed to still ONE tile max)
+      let newTile = null;
+
+      // news / news <topic>
+      const mNews = val.match(/^news(?:\s+(.+))?$/i);
+      if (mNews) {
+        const topic = (mNews[1]||"").trim();
+        if (!topic) {
+          const feeds = RSS_PRESETS.uk;
+          newTile = { id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() };
+        } else {
+          const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
+          newTile = { id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
+        }
+      }
+
+      // Football fixtures
+      if (!newTile && /(football|soccer).*(fixtures|today|scores)/i.test(val)) {
+        const fixUrl = "https://www.bbc.co.uk/sport/football/scores-fixtures";
+        newTile = { id: uid(), type: "web", title: "Football — Fixtures (Today)", meta:{ url: fixUrl, mode:"preview" }, content: webTileMarkup(fixUrl,'preview') };
+      }
+
+      // YouTube
+      if (!newTile) {
+        const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
+        if (ytUrl) {
+          const videoId = ytUrl[1];
+          const playlist = [videoId, ...YT_DEFAULTS.filter(x=>x!==videoId)].slice(0,4);
+          newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:videoId}, content: ytPlaylistMarkup(playlist, videoId) };
+        } else if (/^youtube\s+/i.test(val)) {
+          const playlist = [...YT_DEFAULTS];
+          newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
+        }
+      }
+
+      // Spotify
+      if (!newTile && /spotify/i.test(val)) {
+        const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
+        newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
+      }
+
+      // Stocks
+      if (!newTile && /stocks?|markets?/i.test(val)) {
+        const symbols = ["AAPL","MSFT","BTC-USD"];
+        newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
+      }
+
+      // Weather (stub)
+      if (!newTile && /weather/i.test(val)) {
+        const html = `
+          <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
+          <div class="row" style="margin-top:8px">
+            <div>🌤️</div><div class="muted">Partly cloudy</div><div>18°C</div>
+          </div>`;
+        newTile = { id: uid(), type:"weather", title:"Weather", content: html };
+      }
+
+      // URL -> Web
+      const isUrl = /^https?:\/\//i.test(val);
+      if (!newTile && isUrl) {
+        const url = val;
+        newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+      }
+
+      // LAST RESORT: news topic (single tile)
+      if (!newTile) {
+        const gn = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
+        newTile = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
+      }
+
+      sections.unshift(newTile);
+      localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+      render();
+      tileMenu.classList.add("hidden");
+      tileSearch.value = "";
+    }
+  })();
 });
 
 /* -----------------------------
@@ -1005,12 +976,11 @@ function updateAssistant() {
   appEl.classList.toggle("no-right", !assistantOn);
   localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
 }
-assistantToggle?.addEventListener("click", () => {
+assistantToggle.addEventListener("click", () => {
   assistantOn = !assistantOn;
   updateAssistant();
 });
 function renderChat(){
-  if (!chatLog) return;
   chatLog.innerHTML = "";
   chat.forEach(m=>{
     const d = document.createElement("div");
@@ -1026,7 +996,7 @@ function addChat(role, text){
   renderChat();
 }
 function fakeAIResponse(text){ return `You said: “${text}”. (Local stub)`; }
-chatForm?.addEventListener("submit", (e)=>{
+chatForm.addEventListener("submit", (e)=>{
   e.preventDefault();
   const text = chatInput.value.trim();
   if (!text) return;
@@ -1036,53 +1006,10 @@ chatForm?.addEventListener("submit", (e)=>{
 });
 
 /* -----------------------------
-   Modal helpers
------------------------------ */
-(function modalSafetyNet(){
-  const modal = document.getElementById('modal');
-  const backdrop = document.getElementById('fsBackdrop');
-
-  function isOpen() {
-    return modal && !modal.classList.contains('hidden') && modal.classList.contains('show');
-  }
-  window.__openModal = window.__openModal || function(html){
-    if (!modal) return;
-    modal.innerHTML = html || modal.innerHTML;
-    modal.classList.remove('hidden');
-    modal.classList.add('show');
-    document.body.style.overflow = 'hidden';
-    if (backdrop) backdrop.classList.remove('show');
-  };
-  window.__closeModal = window.__closeModal || function(){
-    if (!modal) return;
-    modal.classList.add('hidden');
-    modal.classList.remove('show');
-    modal.innerHTML = '';
-    document.body.style.overflow = '';
-    if (backdrop) backdrop.classList.remove('show');
-  };
-
-  if (modal) {
-    modal.addEventListener('click', (e)=>{
-      if (e.target === modal) window.__closeModal();
-    });
-    modal.addEventListener('click', (e)=>{
-      const closeBtn = e.target.closest('[data-action="close"],[data-action="cancel"],[data-action="dismiss"]');
-      const saveBtn  = e.target.closest('[data-action="save"],[data-action="ok"],[data-action="apply"]');
-      if (closeBtn || saveBtn) window.__closeModal();
-    });
-  }
-  document.addEventListener('keydown', (e)=>{
-    if (e.key === 'Escape' && isOpen()) window.__closeModal();
-  });
-})();
-
-/* -----------------------------
    Init
 ----------------------------- */
 document.addEventListener("DOMContentLoaded", () => {
-  const yrEl = $("#yr");
-  if (yrEl) yrEl.textContent = new Date().getFullYear();
+  $("#yr").textContent = new Date().getFullYear();
   ensureVersion();
   updateAssistant();
   renderChat();
