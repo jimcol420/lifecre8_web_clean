@@ -1,12 +1,12 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.4
-   Base: v1.9.3 (stable)
-   Fixes:
-     • Stable layout when adding tiles / toggling assistant
-     • Prepend tile without grid collapse
-     • RSS links match theme color (no default blue)
-     • Images via /api/rss?full=1
-     • Smarter Add Tile (AI → Web/Gallery/RSS)
+   LifeCre8 — main.js  v1.9.4 (built on v1.9.3)
+   Stabilization release:
+   - Link color lock (CSS)
+   - Layout hardening & assistant toggle stability
+   - Prepend without reflow
+   - Reset Layout (Settings)
+   - No duplicate tiles from Add Tile (generic = ONE smart RSS)
+   - Render failsafe restore
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -14,7 +14,7 @@ const K_SECTIONS   = "lifecre8.sections";
 const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
-const K_PREFS      = "lifecre8.prefs";
+const K_PREFS      = "lifecre8.prefs"; // theme, density
 const DATA_VERSION = 6;
 
 /* ===== Presets ===== */
@@ -33,11 +33,10 @@ const RSS_PRESETS = {
     "https://www.reuters.com/markets/rss",
   ],
   uk: [
-    "https://feeds.bbci.co.uk/news/rss.xml",
+    "https://feeds.bbci.co.uk/news/rss.xml",          // BBC first = better images
     "https://www.theguardian.com/uk-news/rss",
   ],
 };
-
 const STOCK_PRESETS = {
   "Tech Giants": ["AAPL","MSFT","GOOGL","AMZN","NVDA"],
   "Crypto": ["BTC-USD","ETH-USD","SOL-USD"],
@@ -56,11 +55,9 @@ if (!prefs.density) prefs.density = "comfortable";
 document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
 document.body.classList.toggle('density-compact',  prefs.density === 'compact');
 
-/* timers */
 let dynamicTimers = {};
 let liveIntervals = {};
 
-/* ===== Utils ===== */
 const $  = q => document.querySelector(q);
 const $$ = q => Array.from(document.querySelectorAll(q));
 const uid = () => Math.random().toString(36).slice(2);
@@ -76,18 +73,6 @@ if (!fsBackdrop) {
   fsBackdrop.id = "fsBackdrop";
   document.body.appendChild(fsBackdrop);
 }
-
-/* Ensure RSS links use theme color (not browser default blue) */
-(function injectOnce(){
-  if (document.getElementById("lc-rss-style")) return;
-  const st = document.createElement("style");
-  st.id = "lc-rss-style";
-  st.textContent =
-    `.rss a{color:var(--text);text-decoration:none}
-     .rss a:hover{text-decoration:underline}
-     .rss .muted a{color:var(--muted)}`;
-  document.head.appendChild(st);
-})();
 
 /* -----------------------------
    YouTube helpers
@@ -214,7 +199,6 @@ function rssErrorMarkup() {
 function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
-
   const url = `/api/rss?full=1&url=${encodeURIComponent(feeds[0])}`;
   fetch(url)
     .then(r=>r.json())
@@ -345,7 +329,7 @@ function ensureVersion() {
 }
 
 /* -----------------------------
-   Rendering
+   Rendering (with failsafe)
 ----------------------------- */
 function tileContentFor(section) {
   switch (section.type) {
@@ -384,36 +368,43 @@ function cardHeaderActions(id){
     </div>
   `;
 }
+
 function render() {
-  stopDynamicTimers();
-  stopLiveIntervals();
+  // failsafe snapshot
+  const snapshot = JSON.stringify(sections);
+  try {
+    stopDynamicTimers();
+    stopLiveIntervals();
 
-  const grid = $("#grid");
-  grid.innerHTML = "";
+    const grid = $("#grid");
+    grid.innerHTML = "";
 
-  const others = sections.filter(s=>s.type!=="email");
-  const emails = sections.filter(s=>s.type==="email");
+    const others = sections.filter(s=>s.type!=="email");
+    const emails = sections.filter(s=>s.type==="email");
 
-  [...others, ...emails].forEach(s => {
-    const card = document.createElement("div");
-    card.className = "card";
-    card.dataset.id = s.id;
-    card.dataset.type = s.type || "interest";
-    card.innerHTML = `
-      <h3>
-        <span class="title">${s.title}</span>
-        ${cardHeaderActions(s.id)}
-      </h3>
-      <div class="content">${tileContentFor(s)}</div>
-    `;
-    grid.appendChild(card);
-  });
+    [...others, ...emails].forEach(s => {
+      const card = document.createElement("div");
+      card.className = "card";
+      card.dataset.id = s.id;
+      card.dataset.type = s.type || "interest";
+      card.innerHTML = `
+        <h3>
+          <span class="title">${s.title}</span>
+          ${cardHeaderActions(s.id)}
+        </h3>
+        <div class="content">${tileContentFor(s)}</div>
+      `;
+      grid.appendChild(card);
+    });
 
-  // Force layout settle (prevents weird overlap after prepend / assistant toggle)
-  requestAnimationFrame(()=>window.dispatchEvent(new Event('resize')));
-
-  initDynamicTiles();
-  initLiveFeeds();
+    initDynamicTiles();
+    initLiveFeeds();
+  } catch (err) {
+    console.error("[render] failed, restoring snapshot", err);
+    sections = JSON.parse(snapshot);
+    localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+    requestAnimationFrame(()=>render());
+  }
 }
 
 /* -----------------------------
@@ -458,7 +449,7 @@ function render() {
     render();
   });
 
-  // Settings (modal)
+  // Settings (tile-level)
   grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".settingsBtn");
     if (!btn) return;
@@ -649,7 +640,7 @@ function render() {
     const s = sections.find(x => x.id === id);
     if (!s) return;
     const url = tile.dataset.url;
-    const nextMode = toggle.dataset.mode;
+    const nextMode = toggle.dataset.mode; // "embed" or "preview"
     s.meta = s.meta || {};
     s.meta.url = url;
     s.meta.mode = nextMode;
@@ -702,7 +693,7 @@ function stopLiveIntervals(){
   liveIntervals = {};
 }
 function initDynamicTiles(){
-  // Simulated football heartbeat
+  // Simulated football
   $$('.card[data-type="football"]').forEach(card=>{
     const container = card.querySelector(".scores");
     if (!container) return;
@@ -734,7 +725,7 @@ function initDynamicTiles(){
     dynamicTimers[card.dataset.id] = timer;
   });
 
-  // Simulated stocks (live overwrites)
+  // Simulated stocks as fallback (live overwrites on arrival)
   $$('.card[data-type="stocks"]').forEach(card=>{
     const ticker = card.querySelector(".ticker");
     if (!ticker) return;
@@ -819,11 +810,10 @@ tileSearch.addEventListener("keydown", (e)=>{
 
   const valRaw = tileSearch.value.trim();
   if (!valRaw) return;
-
   const val = valRaw.replace(/\s+/g, " ");
   let newTile = null;
 
-  // 1) Quick commands: news / news <topic>
+  // news / news <topic>
   const mNews = val.match(/^news(?:\s+(.+))?$/i);
   if (mNews) {
     const topic = (mNews[1]||"").trim();
@@ -836,7 +826,7 @@ tileSearch.addEventListener("keydown", (e)=>{
     }
   }
 
-  // 2) Football fixtures today
+  // football fixtures today -> a single Web tile + quick snapshot
   if (!newTile && /(football|soccer).*(fixtures|today|scores)/i.test(val)) {
     const fixUrl = "https://www.bbc.co.uk/sport/football/scores-fixtures";
     const html = `
@@ -862,7 +852,7 @@ tileSearch.addEventListener("keydown", (e)=>{
     }, 80);
   }
 
-  // 3) YouTube by URL or "youtube ..."
+  // YouTube by URL or keyword
   if (!newTile) {
     const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
     if (ytUrl) {
@@ -875,118 +865,67 @@ tileSearch.addEventListener("keydown", (e)=>{
     }
   }
 
-  // 4) Spotify keyword
+  // Spotify
   if (!newTile && /spotify/i.test(val)) {
     const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
     newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
   }
 
-  // 5) Stocks keyword
+  // Stocks
   if (!newTile && /stocks?|markets?/i.test(val)) {
     const symbols = ["AAPL","MSFT","BTC-USD"];
     newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
   }
 
-  // 6) URL -> Web embed (Preview default)
+  // URL -> Web embed
   const isUrl = /^https?:\/\//i.test(val);
   if (!newTile && isUrl) {
     const url = val;
     newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
   }
 
-  // 7) Generic topic => AI (optional) or Web+Gallery+RSS
+  // Generic topic: ONE smart RSS tile (no duplicate gallery)
   if (!newTile) {
-    fetch(`/api/ai-search?q=${encodeURIComponent(val)}`, { method:"GET" })
-      .then(r=>{ if (!r.ok) throw new Error("ai-search not available"); return r.json(); })
-      .then(plan=>{
-        const tiles = plan.tiles || [];
-        const made = tiles.map(t => {
-          if (t.type === "rss" && t.feeds?.length) {
-            return { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
-          }
-          if (t.type === "web" && t.url) {
-            return { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
-          }
-          if (t.type === "youtube" && t.playlist?.length) {
-            const cur = t.playlist[0];
-            return { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
-          }
-          if (t.type === "stocks" && t.symbols?.length) {
-            return { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
-          }
-          if (t.type === "gallery" && t.images?.length) {
-            return { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
-          }
-          return null;
-        }).filter(Boolean);
-
-        if (made.length) {
-          for (let i = made.length - 1; i >= 0; i--) sections.unshift(made[i]);
-          localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-          render();
-          tileMenu.classList.add("hidden");
-          tileSearch.value = "";
-          return;
-        }
-        throw new Error("ai-search empty plan");
-      })
-      .catch(()=>{
-        // Balanced default: Web + Gallery (+ RSS if clearly newsy)
-        const webUrl = `https://duckduckgo.com/?q=${encodeURIComponent(val)}&ia=web`;
-        const img = (n)=>`https://source.unsplash.com/600x600/?${encodeURIComponent(val)}&sig=${n}`;
-        const gal = [img(1),img(2),img(3),img(4),img(5),img(6)];
-        const web = { id: uid(), type:"web", title:`${val} — Web`, meta:{ url:webUrl, mode:"preview" }, content: webTileMarkup(webUrl,"preview") };
-
-        // heuristic: if it contains words like news/headlines, add topic RSS
-        const looksNews = /\bnews|headline|latest|updates?\b/i.test(val);
-        const maybeRss = looksNews
-          ? [{ id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[`https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`] }, content:rssLoadingMarkup() }]
-          : [];
-
-        // We want the first (top-left) to be the “most useful” → try RSS if newsy, else Web
-        const galTile = { id: uid(), type:"gallery", title:`${val} — Gallery`, meta:{ urls: gal }, content: galleryMarkup(gal) };
-        const order = looksNews ? [galTile, web, ...maybeRss] : [galTile, web];
-
-        // prepend in reverse
-        for (let i = order.length - 1; i >= 0; i--) sections.unshift(order[i]);
-
-        localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-        render();
-        tileMenu.classList.add("hidden");
-        tileSearch.value = "";
-      });
-
-    return;
+    const gn = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
+    newTile = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
   }
 
-  // Persist & render for synchronous branches
-  sections.unshift(newTile);
+  // Persist & render (prepend without reflow)
+  if (window.__cfg?.prependNew) {
+    sections.unshift(newTile);
+  } else {
+    sections.push(newTile);
+  }
   localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
   render();
+
   tileMenu.classList.add("hidden");
   tileSearch.value = "";
 });
 
 /* -----------------------------
-   Assistant Toggle & Chat
+   Assistant Toggle & Chat (stable)
 ----------------------------- */
 const assistantToggle = $("#assistantToggle");
 const assistantPanel  = $("#assistantPanel");
 const chatLog   = $("#assistantChat");
 const chatForm  = $("#chatForm");
 const chatInput = $("#chatInput");
+
 function updateAssistant() {
+  // Toggle the column with reflow safety
+  requestAnimationFrame(()=>{
+    appEl.classList.toggle("no-right", !assistantOn);
+  });
   assistantPanel.style.display = assistantOn ? "block" : "none";
   assistantToggle.classList.toggle("primary", assistantOn);
-  appEl.classList.toggle("no-right", !assistantOn);
   localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
-  // Force reflow so grid recalculates columns when right panel changes
-  requestAnimationFrame(()=>window.dispatchEvent(new Event('resize')));
 }
 assistantToggle.addEventListener("click", () => {
   assistantOn = !assistantOn;
   updateAssistant();
 });
+
 function renderChat(){
   chatLog.innerHTML = "";
   chat.forEach(m=>{
@@ -1013,7 +952,7 @@ chatForm.addEventListener("submit", (e)=>{
 });
 
 /* -----------------------------
-   Global settings (Theme + Density)
+   Global settings (Theme + Density + Reset)
 ----------------------------- */
 $("#globalSettingsBtn").addEventListener("click", ()=>{
   const html = `
@@ -1033,6 +972,12 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
           <option value="compact" ${prefs.density==='compact'?'selected':''}>Compact</option>
         </select>
       </div>
+
+      <div class="row" style="margin-top:12px; gap:8px; align-items:center;">
+        <div class="muted">Problems? You can reset layout & cache.</div>
+        <button class="btn sm" id="g_reset">Reset Layout</button>
+      </div>
+
       <div class="actions" style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
         <button class="btn sm" data-action="cancel">Cancel</button>
         <button class="btn sm primary" data-action="save" id="g_save">Save</button>
@@ -1040,6 +985,20 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
     </div>
   `;
   __openModal(html);
+
+  $("#g_reset")?.addEventListener("click", async ()=>{
+    try {
+      localStorage.removeItem(K_SECTIONS);
+      localStorage.removeItem(K_VERSION);
+      // clear SW
+      if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const r of regs) await r.unregister();
+      }
+      location.reload();
+    } catch { location.reload(); }
+  });
+
   $("#g_save")?.addEventListener("click", ()=>{
     const theme = $("#g_theme").value;
     const density = $("#g_density").value;
@@ -1097,7 +1056,7 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
    Init
 ----------------------------- */
 document.addEventListener("DOMContentLoaded", () => {
-  $("#yr")?.textContent = new Date().getFullYear();
+  $("#yr").textContent = new Date().getFullYear();
   ensureVersion();
   updateAssistant();
   renderChat();

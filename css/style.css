@@ -1,5 +1,9 @@
-/* LifeCre8 — style.css v1.7.3 */
-/* Solar (dark) + Ice (light) */
+/* LifeCre8 — style.css v1.9.4 (built on v1.9.3) */
+/* Solar (default dark) + Ice (light) */
+
+/* ✅ Link color lock (stops surprise blue) */
+a{ color: var(--text); text-decoration: none; }
+a:hover{ color: var(--primary); text-decoration: underline; }
 
 :root{
   --bg:#0f1320; --panel:#1c2433; --card:#262c3f; --border:#3b455e;
@@ -20,25 +24,17 @@ body.density-compact{ --card-height:340px; }
 html,body{height:100%}
 body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--text);overflow:hidden}
 
-/* Layout grid */
-.app{
-  display:grid;
-  grid-template-columns:64px minmax(0,1fr) var(--right-width);
-  min-height:100vh;
-}
-.app.no-right{
-  grid-template-columns:64px minmax(0,1fr) 0;
-}
+/* ✅ Layout stability: when assistant off, remove the column entirely */
+.app{display:grid;grid-template-columns:64px 1fr var(--right-width);min-height:100vh}
+.app.no-right{grid-template-columns:64px 1fr}
 
-/* Sidebar */
 .sidebar{position:sticky;top:0;height:100vh;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding:12px 8px;gap:10px;overflow:auto}
 .sb-icon{width:42px;height:42px;border-radius:12px;background:var(--card);border:1px solid var(--border);display:grid;place-items:center;cursor:pointer;font-size:18px}
 .sb-icon:hover{border-color:var(--primary)}
 .sb-divider{width:100%;height:1px;background:var(--border);margin:6px 0}
 
-/* Main + topbar */
 .main{grid-column:2;height:100vh;overflow:auto}
-.topbar{position:sticky;top:0;z-index:20;background:var(--panel);border-bottom:1px solid var(--border)}
+.topbar{position:sticky;top:0;z-index:50;background:var(--panel);border-bottom:1px solid var(--border)}
 .wrap{max-width:1200px;margin:0 auto;padding:12px 16px;display:flex;gap:10px;align-items:center}
 body.density-compact .wrap{padding:8px 12px}
 .spacer{flex:1 1 auto}
@@ -57,50 +53,27 @@ body.density-compact .input{padding:8px 10px}
 .btn.sm{padding:6px 10px;border-radius:8px;font-size:12px;min-height:30px}
 body.density-compact .btn.sm{padding:4px 8px;min-height:26px}
 
-/* Cards grid */
-.grid{
-  max-width:1200px;
-  margin:0 auto;
-  padding:16px;
-  display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:16px;
-  align-items:start;             /* keep tops aligned */
-}
+.grid{max-width:1200px;margin:0 auto;padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:16px}
 @media(max-width:980px){.grid{grid-template-columns:1fr}}
 
-.card{
-  background:var(--card);
-  border:1px solid var(--border);
-  border-radius:16px;
-  padding:14px;
-  box-shadow:0 2px 10px rgba(0,0,0,.15);
-  height:var(--card-height);
-  display:flex;flex-direction:column;
-  min-width:0; /* prevents overflow pushing layout */
-}
+.card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:14px;box-shadow:0 2px 10px rgba(0,0,0,.15);height:var(--card-height);display:flex;flex-direction:column}
 .card h3{margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px}
 .card h3 .title{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .card h3 .actions{flex:0 0 auto;display:flex;gap:6px;white-space:nowrap}
 .card .content{flex:1;overflow:auto}
 
-/* Link color fix */
-.card a{color:var(--text);text-decoration:underline}
-.card a:hover{color:var(--primary)}
-
-/* Rows/muted text */
 .row{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .muted{color:var(--muted);font-size:12px}
 
-/* Fullscreen card */
 #fsBackdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9998;display:none}
 #fsBackdrop.show{display:block}
 .card.card-full{position:fixed;z-index:9999;inset:10px;width:auto;height:auto;max-width:none;left:0;right:0;transform:none;display:flex;flex-direction:column;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
 .card.card-full .content{flex:1;overflow:auto}
 .card.card-full .removeBtn{display:none}
 
-/* Right panel (assistant) */
-.right{grid-column:3;position:sticky;top:0;height:100vh;overflow:auto;border-left:1px solid var(--border);background:var(--panel);padding:16px;display:flex;flex-direction:column;gap:10px;z-index:10}
+/* Chat panel */
+.right{grid-column:3;position:sticky;top:0;height:100vh;overflow:auto;border-left:1px solid var(--border);background:var(--panel);padding:16px;display:flex;flex-direction:column;gap:10px}
+.app.no-right .right{display:none}
 .assistant-chat{height:calc(100vh - 170px);overflow-y:auto;border:1px solid var(--border);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:8px;background:var(--card)}
 .chat-form{display:flex;gap:8px}
 .msg{padding:8px 10px;border-radius:10px;max-width:90%;border:1px solid var(--border)}
@@ -124,12 +97,8 @@ body.density-compact .btn.sm{padding:4px 8px;min-height:26px}
 .yt-thumb{width:72px;height:42px;object-fit:cover;border-radius:6px;background:#0a1522;border:1px solid var(--border)}
 .yt-title{font-size:12px;line-height:1.2;color:var(--muted)}
 
-/* Web embed preview */
 .web-fallback,.web-preview{border:1px dashed var(--border);border-radius:12px;padding:10px;background:rgba(0,0,0,.03)}
 .web-favicon{width:16px;height:16px;border-radius:4px;margin-right:6px;vertical-align:-3px}
-
-/* RSS item */
-.rss .rss-item + .rss-item{margin-top:8px}
 
 /* Stocks */
 .ticker{display:grid;gap:8px}
@@ -158,10 +127,9 @@ body.density-compact .btn.sm{padding:4px 8px;min-height:26px}
 .gallery-view.show{display:flex}
 .gallery-view img{max-width:90%;max-height:90%;border-radius:12px}
 
+/* RSS with images */
+.rss-item{padding:8px 6px;border-bottom:1px dashed var(--border)}
+.rss-item:last-child{border-bottom:0}
+
 /* Footer */
 .footer{padding:16px;text-align:center;color:var(--muted)}
-
-/* Modal */
-#modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.55);z-index:2000}
-#modal.show{display:flex}
-#modal .modal-card{width:min(560px,calc(100% - 32px));max-height:calc(100vh - 32px);overflow:auto;background:var(--panel);border:1px solid var(--border);border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.6);padding:16px}
