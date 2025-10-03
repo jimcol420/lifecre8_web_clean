@@ -1,8 +1,8 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.5 (built on v1.9.4)
-   - Improve RSS list rendering with images & cleaner layout
-   - Pass topic hint to /api/rss for better image enrichment
-   - Keep “prepend new tile” behavior without touching layout code
+   LifeCre8 — main.js  v1.9.6 (built on v1.9.5)
+   - Intent-aware Add Tile (marketplace, recipes, images, wiki, fixtures, price/tickers, YouTube, web)
+   - News only when explicitly asked ("news", "news <topic>")
+   - Keep existing RSS image-enriched lists, layout, assistant, etc.
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -157,7 +157,7 @@ function spotifyMarkup(spotifyUrl) {
 }
 
 /* -----------------------------
-   RSS tile (LIVE via /api/rss) — v1.9.5
+   RSS tile (LIVE via /api/rss)
 ----------------------------- */
 function thumbHTML(url){
   if (!url) return `<div class="thumb fallback">no image</div>`;
@@ -202,7 +202,6 @@ function loadRssInto(card, feeds, topicHint="", attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
 
-  // Ask server to include images; pass topic hint for better enrichment
   const u = new URL(`/api/rss`, location.origin);
   u.searchParams.set("full","1");
   u.searchParams.set("url", feeds[0]);
@@ -794,7 +793,7 @@ function flashGoal(card, matchIdx, scoreText){
 }
 
 /* -----------------------------
-   Add Tile
+   Intent-aware Add Tile
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
@@ -805,80 +804,122 @@ addBtn.addEventListener("click", () => {
   if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
 });
 
+// helpers for search URLs (safe, no keys needed)
+function googleSearchURL(q){ return `https://www.google.com/search?q=${encodeURIComponent(q)}`; }
+function googleImagesURL(q){ return `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(q)}`; }
+function wikipediaSearchURL(q){ return `https://en.wikipedia.org/w/index.php?search=${encodeURIComponent(q)}`; }
+function ebaySearchURL(q){ return `https://www.ebay.co.uk/sch/i.html?_nkw=${encodeURIComponent(q)}`; }
+function autotraderSearchURL(q){ return `https://www.google.com/search?q=${encodeURIComponent(`site:autotrader.co.uk ${q}`)}`; }
+function goodFoodSearchURL(q){ return `https://www.bbcgoodfood.com/search?q=${encodeURIComponent(q)}`; }
+function bbcFixturesURL(){ return `https://www.bbc.co.uk/sport/football/scores-fixtures`; }
+
+function buildGalleryFrom(q, n=6){
+  const base = q.replace(/\s+/g,'+');
+  const mk = i => `https://source.unsplash.com/600x600/?${encodeURIComponent(base)}&sig=${i}`;
+  return Array.from({length:n},(_,i)=>mk(i+1));
+}
+
+function isLikelyTickerToken(t){
+  // crude: all caps A-Z . ^ - up to 6 chars, or CRYPTO-USD style
+  return /^[A-Z\^\.]{1,6}(-USD)?$/.test(t);
+}
+
+function createTileFromQuery(val){
+  const q = val.trim();
+  const ql = q.toLowerCase();
+
+  // 0) Explicit news
+  const mNews = q.match(/^news(?:\s+(.+))?$/i);
+  if (mNews) {
+    const topic = (mNews[1]||"").trim();
+    if (!topic) {
+      const feeds = RSS_PRESETS.uk;
+      return { id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() };
+    }
+    const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
+    return { id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
+  }
+
+  // 1) “for sale” / buy intent
+  if (/\b(for sale|to buy|buy|sell)\b/.test(ql)) {
+    const isCar = /\bcar|cars|bmw|audi|mercedes|ford|vauxhall|tesla|van|motorbike|vehicle\b/.test(ql);
+    const url = isCar ? autotraderSearchURL(q) : ebaySearchURL(q);
+    return { id: uid(), type:"web", title: isCar ? "AutoTrader (Search)" : "eBay (Search)", meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
+  }
+
+  // 2) Recipes intent
+  if (/\b(recipe|recipes|how to (cook|bake)|ingredients)\b/.test(ql)) {
+    const url = goodFoodSearchURL(q);
+    return { id: uid(), type:"web", title:"Recipes — BBC Good Food", meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
+  }
+
+  // 3) Images intent -> gallery
+  if (/\b(images?|pictures?|wallpaper|photos?)\b/.test(ql)) {
+    const imgs = buildGalleryFrom(q, 9);
+    return { id: uid(), type:"gallery", title:`${q} — Images`, meta:{ urls: imgs }, content: galleryMarkup(imgs) };
+  }
+
+  // 4) Wikipedia intent
+  if (/^(what is|who is|wikipedia|wiki)\b/.test(ql)) {
+    const cleaned = q.replace(/^(what is|who is|wikipedia|wiki)\s*/i,'').trim() || q;
+    const url = wikipediaSearchURL(cleaned);
+    return { id: uid(), type:"web", title:`Wikipedia — ${cleaned}`, meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
+  }
+
+  // 5) Football fixtures / scores
+  if (/(football|soccer).*(fixtures|scores|today|results)/i.test(ql)) {
+    const url = bbcFixturesURL();
+    return { id: uid(), type:"web", title:"Football — Fixtures (BBC)", meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
+  }
+
+  // 6) Price / ticker detection
+  const mPrice = q.match(/^price of\s+(.+)/i);
+  if (mPrice) {
+    const token = mPrice[1].trim().toUpperCase();
+    const sym = isLikelyTickerToken(token) ? token : token.replace(/\s+/g,'-').toUpperCase();
+    return { id: uid(), type:"stocks", title:`Price — ${sym}`, meta:{ symbols:[sym] }, content: tickerMarkup([sym]) };
+  }
+  // “AAPL MSFT” -> treat as tickers
+  const parts = q.split(/[\s,]+/).filter(Boolean);
+  const maybeSyms = parts.filter(isLikelyTickerToken);
+  if (maybeSyms.length) {
+    return { id: uid(), type:"stocks", title:`Markets — ${maybeSyms.join(', ')}`, meta:{ symbols: maybeSyms }, content: tickerMarkup(maybeSyms) };
+  }
+
+  // 7) YouTube quick
+  const mYT = q.match(/(?:^youtube\s+|youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)?/i);
+  if (mYT) {
+    const vid = mYT[1];
+    if (vid) {
+      const playlist = [vid, ...YT_DEFAULTS.filter(x=>x!==vid)].slice(0,4);
+      return { id: uid(), type:"youtube", title:"YouTube", meta:{ playlist, current: vid }, content: ytPlaylistMarkup(playlist, vid) };
+    }
+    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(q.replace(/^youtube\s+/i,''))}`;
+    return { id: uid(), type:"web", title:"YouTube — Search", meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
+  }
+
+  // 8) Direct URL -> Web tile
+  if (/^https?:\/\//i.test(q)) {
+    const url = q;
+    return { id: uid(), type:"web", title: new URL(q).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
+  }
+
+  // 9) Default: general Web search (NOT news)
+  const url = googleSearchURL(q);
+  return { id: uid(), type:"web", title:`Search — ${q}`, meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
+}
+
 tileSearch.addEventListener("keydown", (e)=>{
   if (e.key !== "Enter") {
     if (e.key === "Escape") tileMenu.classList.add("hidden");
     return;
   }
-
   const valRaw = tileSearch.value.trim();
   if (!valRaw) return;
 
-  const val = valRaw.replace(/\s+/g, " ");
-  let newTile = null;
+  const newTile = createTileFromQuery(valRaw);
 
-  // 1) Quick commands: news / news <topic>
-  const mNews = val.match(/^news(?:\s+(.+))?$/i);
-  if (mNews) {
-    const topic = (mNews[1]||"").trim();
-    if (!topic) {
-      const feeds = RSS_PRESETS.uk;
-      newTile = { id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() };
-    } else {
-      const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
-      newTile = { id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
-    }
-  }
-
-  // 2) YouTube by URL or "youtube ..."
-  if (!newTile) {
-    const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
-    if (ytUrl) {
-      const videoId = ytUrl[1];
-      const playlist = [videoId, ...YT_DEFAULTS.filter(x=>x!==videoId)].slice(0,4);
-      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:videoId}, content: ytPlaylistMarkup(playlist, videoId) };
-    } else if (/^youtube\s+/i.test(val)) {
-      const playlist = [...YT_DEFAULTS];
-      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
-    }
-  }
-
-  // 3) Spotify
-  if (!newTile && /spotify/i.test(val)) {
-    const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
-    newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
-  }
-
-  // 4) Stocks
-  if (!newTile && /stocks?|markets?/i.test(val)) {
-    const symbols = ["AAPL","MSFT","BTC-USD"];
-    newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
-  }
-
-  // 5) Weather (stub)
-  if (!newTile && /weather/i.test(val)) {
-    const html = `
-      <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
-      <div class="row" style="margin-top:8px">
-        <div>🌤️</div><div class="muted">Partly cloudy</div><div>18°C</div>
-      </div>`;
-    newTile = { id: uid(), type:"weather", title:"Weather", content: html };
-  }
-
-  // 6) URL -> Web embed
-  const isUrl = /^https?:\/\//i.test(val);
-  if (!newTile && isUrl) {
-    const url = val;
-    newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
-  }
-
-  // 7) Fallback: topic news feed (Google News RSS) with image enrichment
-  if (!newTile) {
-    const gn = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
-    newTile = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
-  }
-
-  // PREPEND tile (top-left)
+  // PREPEND a single tile (no multi-tile fan-out here)
   sections.unshift(newTile);
   localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
   render();
