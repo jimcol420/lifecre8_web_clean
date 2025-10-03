@@ -1,6 +1,12 @@
 /* ============================================================
    LifeCre8 — main.js  v1.9.4
-   Builds on v1.9.3
+   Base: v1.9.3 (stable)
+   Fixes:
+     • Stable layout when adding tiles / toggling assistant
+     • Prepend tile without grid collapse
+     • RSS links match theme color (no default blue)
+     • Images via /api/rss?full=1
+     • Smarter Add Tile (AI → Web/Gallery/RSS)
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -50,9 +56,11 @@ if (!prefs.density) prefs.density = "comfortable";
 document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
 document.body.classList.toggle('density-compact',  prefs.density === 'compact');
 
+/* timers */
 let dynamicTimers = {};
 let liveIntervals = {};
 
+/* ===== Utils ===== */
 const $  = q => document.querySelector(q);
 const $$ = q => Array.from(document.querySelectorAll(q));
 const uid = () => Math.random().toString(36).slice(2);
@@ -68,6 +76,18 @@ if (!fsBackdrop) {
   fsBackdrop.id = "fsBackdrop";
   document.body.appendChild(fsBackdrop);
 }
+
+/* Ensure RSS links use theme color (not browser default blue) */
+(function injectOnce(){
+  if (document.getElementById("lc-rss-style")) return;
+  const st = document.createElement("style");
+  st.id = "lc-rss-style";
+  st.textContent =
+    `.rss a{color:var(--text);text-decoration:none}
+     .rss a:hover{text-decoration:underline}
+     .rss .muted a{color:var(--muted)}`;
+  document.head.appendChild(st);
+})();
 
 /* -----------------------------
    YouTube helpers
@@ -194,6 +214,7 @@ function rssErrorMarkup() {
 function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
+
   const url = `/api/rss?full=1&url=${encodeURIComponent(feeds[0])}`;
   fetch(url)
     .then(r=>r.json())
@@ -208,7 +229,7 @@ function loadRssInto(card, feeds, attempt=1) {
 }
 
 /* -----------------------------
-   Gallery tile (kept, not auto-created)
+   Gallery tile
 ----------------------------- */
 function galleryMarkup(urls) {
   const imgs = (urls || []).map(u => `<img src="${u}" alt="">`).join("");
@@ -388,10 +409,8 @@ function render() {
     grid.appendChild(card);
   });
 
-  // keep layout stable when assistant toggles or new items prepend
-  requestAnimationFrame(() => {
-    grid.style.minHeight = grid.scrollHeight + "px";
-  });
+  // Force layout settle (prevents weird overlap after prepend / assistant toggle)
+  requestAnimationFrame(()=>window.dispatchEvent(new Event('resize')));
 
   initDynamicTiles();
   initLiveFeeds();
@@ -439,7 +458,7 @@ function render() {
     render();
   });
 
-  // Settings
+  // Settings (modal)
   grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".settingsBtn");
     if (!btn) return;
@@ -452,45 +471,64 @@ function render() {
       const url = s.meta?.url || "";
       const mode = s.meta?.mode || "preview";
       fields = `
-        <div class="field"><label>URL</label><input class="input" id="set_url" value="${url}"></div>
+        <div class="field">
+          <label>URL</label>
+          <input class="input" id="set_url" value="${url}">
+        </div>
         <div class="field">
           <label>Mode</label>
           <select class="input" id="set_mode">
             <option value="preview" ${mode==='preview'?'selected':''}>Preview</option>
             <option value="embed" ${mode==='embed'?'selected':''}>Embed</option>
           </select>
-        </div>`;
+        </div>
+      `;
     } else if (s.type === "youtube") {
       const list = (s.meta?.playlist || YT_DEFAULTS).join(",");
-      fields = `<div class="field"><label>Playlist (IDs)</label><input class="input" id="set_playlist" value="${list}"></div>`;
+      fields = `
+        <div class="field">
+          <label>Playlist (comma-separated video IDs)</label>
+          <input class="input" id="set_playlist" value="${list}">
+        </div>
+      `;
     } else if (s.type === "stocks") {
       const syms = (s.meta?.symbols || ["AAPL","MSFT","BTC-USD"]).join(",");
-      const presetOptions = Object.keys(STOCK_PRESETS).map(n=>`<option value="${n}">${n}</option>`).join("");
+      const presetOptions = Object.keys(STOCK_PRESETS).map(name=>`<option value="${name}">${name}</option>`).join("");
       fields = `
-        <div class="field"><label>Symbols (comma-separated)</label><input class="input" id="set_symbols" value="${syms}"></div>
+        <div class="field">
+          <label>Symbols (comma-separated)</label>
+          <input class="input" id="set_symbols" value="${syms}">
+        </div>
         <div class="field">
           <label>Presets</label>
           <div class="row" style="gap:8px">
             <select class="input" id="set_symbols_preset" style="min-width:180px">
-              <option value="">Choose a preset…</option>${presetOptions}
+              <option value="">Choose a preset…</option>
+              ${presetOptions}
             </select>
             <button class="btn sm" id="apply_symbols_preset" type="button">Apply</button>
           </div>
-        </div>`;
+        </div>
+      `;
     } else if (s.type === "rss") {
       const feeds = (s.meta?.feeds || RSS_PRESETS.uk).join(",");
-      const presetOptions = Object.keys(RSS_PRESETS).map(k=>`<option value="${k}">${k.toUpperCase()}</option>`).join("");
+      const presetOptions = Object.keys(RSS_PRESETS).map(key=>`<option value="${key}">${key.toUpperCase()}</option>`).join("");
       fields = `
-        <div class="field"><label>RSS feeds (first used)</label><input class="input" id="set_feeds" value="${feeds}"></div>
+        <div class="field">
+          <label>RSS feeds (comma-separated URLs; first is used)</label>
+          <input class="input" id="set_feeds" value="${feeds}">
+        </div>
         <div class="field">
           <label>News Presets</label>
           <div class="row" style="gap:8px">
             <select class="input" id="set_feeds_preset" style="min-width:180px">
-              <option value="">Choose a preset…</option>${presetOptions}
+              <option value="">Choose a preset…</option>
+              ${presetOptions}
             </select>
             <button class="btn sm" id="apply_feeds_preset" type="button">Apply</button>
           </div>
-        </div>`;
+        </div>
+      `;
     } else {
       fields = `<div class="muted">No settings for this tile.</div>`;
     }
@@ -503,7 +541,8 @@ function render() {
           <button class="btn sm" data-action="cancel">Cancel</button>
           <button class="btn sm primary" data-action="save" id="settingsSaveBtn">Save</button>
         </div>
-      </div>`;
+      </div>
+    `;
     __openModal(html);
 
     $("#apply_symbols_preset")?.addEventListener("click", ()=>{
@@ -654,11 +693,16 @@ function render() {
 /* -----------------------------
    Dynamic tiles & live feeds
 ----------------------------- */
-function stopDynamicTimers(){ Object.values(dynamicTimers).forEach(clearInterval); dynamicTimers = {}; }
-function stopLiveIntervals(){ Object.values(liveIntervals).forEach(clearInterval); liveIntervals = {}; }
-
+function stopDynamicTimers(){
+  Object.values(dynamicTimers).forEach(clearInterval);
+  dynamicTimers = {};
+}
+function stopLiveIntervals(){
+  Object.values(liveIntervals).forEach(clearInterval);
+  liveIntervals = {};
+}
 function initDynamicTiles(){
-  // Simulated football
+  // Simulated football heartbeat
   $$('.card[data-type="football"]').forEach(card=>{
     const container = card.querySelector(".scores");
     if (!container) return;
@@ -690,7 +734,7 @@ function initDynamicTiles(){
     dynamicTimers[card.dataset.id] = timer;
   });
 
-  // Stocks fallback animation (live feed overwrites)
+  // Simulated stocks (live overwrites)
   $$('.card[data-type="stocks"]').forEach(card=>{
     const ticker = card.querySelector(".ticker");
     if (!ticker) return;
@@ -705,7 +749,6 @@ function initDynamicTiles(){
     dynamicTimers[card.dataset.id] = timer;
   });
 }
-
 function initLiveFeeds(){
   // RSS (live)
   $$('.card[data-type="rss"]').forEach(card=>{
@@ -728,7 +771,7 @@ function initLiveFeeds(){
   });
 }
 
-/* stock fallbacks for animation */
+/* stock fallbacks for simulation */
 function seedPrice(sym){ if (sym.includes("BTC")) return 65000 + Math.random()*4000; if (sym.includes("ETH")) return 3200 + Math.random()*300; return 100 + Math.random()*100; }
 function stepPrice(p){ const drift = (Math.random()-0.5) * (p*0.004); return Math.max(0.01, p + drift); }
 function renderTicker(card, prices, prev){
@@ -757,7 +800,7 @@ function flashGoal(card, matchIdx, scoreText){
 }
 
 /* -----------------------------
-   Add Tile — intent router
+   Add Tile
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
@@ -768,37 +811,33 @@ addBtn.addEventListener("click", () => {
   if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
 });
 
-function makeAndPrepend(tile){
-  sections.unshift(tile);
-  localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-  render();
-  tileMenu.classList.add("hidden");
-  tileSearch.value = "";
-  const grid = $("#grid");
-  grid?.scrollTo?.({top:0, behavior:"smooth"});
-}
-
 tileSearch.addEventListener("keydown", (e)=>{
-  if (e.key !== "Enter") { if (e.key === "Escape") tileMenu.classList.add("hidden"); return; }
+  if (e.key !== "Enter") {
+    if (e.key === "Escape") tileMenu.classList.add("hidden");
+    return;
+  }
 
   const valRaw = tileSearch.value.trim();
   if (!valRaw) return;
-  const val = valRaw.replace(/\s+/g, " ");
 
-  // 1) News routes
+  const val = valRaw.replace(/\s+/g, " ");
+  let newTile = null;
+
+  // 1) Quick commands: news / news <topic>
   const mNews = val.match(/^news(?:\s+(.+))?$/i);
   if (mNews) {
     const topic = (mNews[1]||"").trim();
     if (!topic) {
-      return makeAndPrepend({ id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds: RSS_PRESETS.uk }, content: rssLoadingMarkup() });
+      const feeds = RSS_PRESETS.uk;
+      newTile = { id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() };
     } else {
       const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
-      return makeAndPrepend({ id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() });
+      newTile = { id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
     }
   }
 
-  // 2) Football fixtures
-  if (/(football|soccer).*(fixtures|today|scores)/i.test(val)) {
+  // 2) Football fixtures today
+  if (!newTile && /(football|soccer).*(fixtures|today|scores)/i.test(val)) {
     const fixUrl = "https://www.bbc.co.uk/sport/football/scores-fixtures";
     const html = `
       <div>
@@ -809,10 +848,9 @@ tileSearch.addEventListener("keydown", (e)=>{
           <a class="btn sm" href="${fixUrl}" target="_blank" rel="noopener">Open</a>
         </div>
       </div>`;
-    const tile = { id: uid(), type: "web", title: "Football — Fixtures (Today)", meta:{ url: fixUrl, mode:"preview" }, content: html };
-    makeAndPrepend(tile);
+    newTile = { id: uid(), type: "web", title: "Football — Fixtures (Today)", meta:{ url: fixUrl, mode:"preview" }, content: html };
     setTimeout(()=>{
-      const card = document.querySelector(`.card[data-id="${tile.id}"]`);
+      const card = document.querySelector(`.card[data-id="${newTile.id}"]`);
       const list = card?.querySelector('#fx-quick');
       if (!list) return;
       fetch(`/api/rss?url=${encodeURIComponent('https://feeds.bbci.co.uk/sport/football/rss.xml')}`)
@@ -822,50 +860,111 @@ tileSearch.addEventListener("keydown", (e)=>{
         })
         .catch(()=>{ list.innerHTML = `<li class="muted">Open for full fixtures →</li>`; });
     }, 80);
+  }
+
+  // 3) YouTube by URL or "youtube ..."
+  if (!newTile) {
+    const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
+    if (ytUrl) {
+      const videoId = ytUrl[1];
+      const playlist = [videoId, ...YT_DEFAULTS.filter(x=>x!==videoId)].slice(0,4);
+      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:videoId}, content: ytPlaylistMarkup(playlist, videoId) };
+    } else if (/^youtube\s+/i.test(val)) {
+      const playlist = [...YT_DEFAULTS];
+      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
+    }
+  }
+
+  // 4) Spotify keyword
+  if (!newTile && /spotify/i.test(val)) {
+    const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
+    newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
+  }
+
+  // 5) Stocks keyword
+  if (!newTile && /stocks?|markets?/i.test(val)) {
+    const symbols = ["AAPL","MSFT","BTC-USD"];
+    newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
+  }
+
+  // 6) URL -> Web embed (Preview default)
+  const isUrl = /^https?:\/\//i.test(val);
+  if (!newTile && isUrl) {
+    const url = val;
+    newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+  }
+
+  // 7) Generic topic => AI (optional) or Web+Gallery+RSS
+  if (!newTile) {
+    fetch(`/api/ai-search?q=${encodeURIComponent(val)}`, { method:"GET" })
+      .then(r=>{ if (!r.ok) throw new Error("ai-search not available"); return r.json(); })
+      .then(plan=>{
+        const tiles = plan.tiles || [];
+        const made = tiles.map(t => {
+          if (t.type === "rss" && t.feeds?.length) {
+            return { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
+          }
+          if (t.type === "web" && t.url) {
+            return { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
+          }
+          if (t.type === "youtube" && t.playlist?.length) {
+            const cur = t.playlist[0];
+            return { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
+          }
+          if (t.type === "stocks" && t.symbols?.length) {
+            return { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
+          }
+          if (t.type === "gallery" && t.images?.length) {
+            return { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
+          }
+          return null;
+        }).filter(Boolean);
+
+        if (made.length) {
+          for (let i = made.length - 1; i >= 0; i--) sections.unshift(made[i]);
+          localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+          render();
+          tileMenu.classList.add("hidden");
+          tileSearch.value = "";
+          return;
+        }
+        throw new Error("ai-search empty plan");
+      })
+      .catch(()=>{
+        // Balanced default: Web + Gallery (+ RSS if clearly newsy)
+        const webUrl = `https://duckduckgo.com/?q=${encodeURIComponent(val)}&ia=web`;
+        const img = (n)=>`https://source.unsplash.com/600x600/?${encodeURIComponent(val)}&sig=${n}`;
+        const gal = [img(1),img(2),img(3),img(4),img(5),img(6)];
+        const web = { id: uid(), type:"web", title:`${val} — Web`, meta:{ url:webUrl, mode:"preview" }, content: webTileMarkup(webUrl,"preview") };
+
+        // heuristic: if it contains words like news/headlines, add topic RSS
+        const looksNews = /\bnews|headline|latest|updates?\b/i.test(val);
+        const maybeRss = looksNews
+          ? [{ id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[`https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`] }, content:rssLoadingMarkup() }]
+          : [];
+
+        // We want the first (top-left) to be the “most useful” → try RSS if newsy, else Web
+        const galTile = { id: uid(), type:"gallery", title:`${val} — Gallery`, meta:{ urls: gal }, content: galleryMarkup(gal) };
+        const order = looksNews ? [galTile, web, ...maybeRss] : [galTile, web];
+
+        // prepend in reverse
+        for (let i = order.length - 1; i >= 0; i--) sections.unshift(order[i]);
+
+        localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+        render();
+        tileMenu.classList.add("hidden");
+        tileSearch.value = "";
+      });
+
     return;
   }
 
-  // 3) for sale → shopping web tile
-  if (/for sale/i.test(val)) {
-    const url = `https://duckduckgo.com/?q=${encodeURIComponent(val)}&ia=shopping`;
-    return makeAndPrepend({ id: uid(), type:"web", title: val, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") });
-  }
-
-  // 4) YouTube
-  const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
-  if (ytUrl) {
-    const videoId = ytUrl[1];
-    const playlist = [videoId, ...YT_DEFAULTS.filter(x=>x!==videoId)].slice(0,4);
-    return makeAndPrepend({ id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:videoId}, content: ytPlaylistMarkup(playlist, videoId) });
-  }
-  if (/^youtube\s+/i.test(val)) {
-    const playlist = [...YT_DEFAULTS];
-    return makeAndPrepend({ id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) });
-  }
-
-  // 5) Spotify
-  if (/spotify/i.test(val)) {
-    const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
-    return makeAndPrepend({ id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) });
-  }
-
-  // 6) Stocks
-  if (/stocks?|markets?/i.test(val)) {
-    const symbols = ["AAPL","MSFT","BTC-USD"];
-    return makeAndPrepend({ id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) });
-  }
-
-  // 7) URL → Web
-  if (/^https?:\/\//i.test(val)) {
-    const url = val;
-    return makeAndPrepend({ id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") });
-  }
-
-  // 8) Generic topic → single smart news tile (with images)
-  const gn = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
-  const smartTitle = `Daily Brief — ${val}`;
-  const tile = { id: uid(), type:"rss", title: smartTitle, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
-  makeAndPrepend(tile);
+  // Persist & render for synchronous branches
+  sections.unshift(newTile);
+  localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+  render();
+  tileMenu.classList.add("hidden");
+  tileSearch.value = "";
 });
 
 /* -----------------------------
@@ -881,6 +980,8 @@ function updateAssistant() {
   assistantToggle.classList.toggle("primary", assistantOn);
   appEl.classList.toggle("no-right", !assistantOn);
   localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
+  // Force reflow so grid recalculates columns when right panel changes
+  requestAnimationFrame(()=>window.dispatchEvent(new Event('resize')));
 }
 assistantToggle.addEventListener("click", () => {
   assistantOn = !assistantOn;
@@ -912,7 +1013,7 @@ chatForm.addEventListener("submit", (e)=>{
 });
 
 /* -----------------------------
-   Global settings
+   Global settings (Theme + Density)
 ----------------------------- */
 $("#globalSettingsBtn").addEventListener("click", ()=>{
   const html = `
@@ -936,7 +1037,8 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
         <button class="btn sm" data-action="cancel">Cancel</button>
         <button class="btn sm primary" data-action="save" id="g_save">Save</button>
       </div>
-    </div>`;
+    </div>
+  `;
   __openModal(html);
   $("#g_save")?.addEventListener("click", ()=>{
     const theme = $("#g_theme").value;
@@ -950,30 +1052,45 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
 });
 
 /* -----------------------------
-   Modal safety
+   Modal close safety net
 ----------------------------- */
 (function modalSafetyNet(){
   const modal = document.getElementById('modal');
   const backdrop = document.getElementById('fsBackdrop');
-  function isOpen(){ return modal && !modal.classList.contains('hidden') && modal.classList.contains('show'); }
+
+  function isOpen() {
+    return modal && !modal.classList.contains('hidden') && modal.classList.contains('show');
+  }
   window.__openModal = window.__openModal || function(html){
-    if (!modal) return; modal.innerHTML = html || modal.innerHTML;
-    modal.classList.remove('hidden'); modal.classList.add('show');
-    document.body.style.overflow = 'hidden'; if (backdrop) backdrop.classList.remove('show');
+    if (!modal) return;
+    modal.innerHTML = html || modal.innerHTML;
+    modal.classList.remove('hidden');
+    modal.classList.add('show');
+    document.body.style.overflow = 'hidden';
+    if (backdrop) backdrop.classList.remove('show');
   };
   window.__closeModal = window.__closeModal || function(){
-    if (!modal) return; modal.classList.add('hidden'); modal.classList.remove('show');
-    modal.innerHTML = ''; document.body.style.overflow = ''; if (backdrop) backdrop.classList.remove('show');
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.classList.remove('show');
+    modal.innerHTML = '';
+    document.body.style.overflow = '';
+    if (backdrop) backdrop.classList.remove('show');
   };
+
   if (modal) {
-    modal.addEventListener('click', (e)=>{ if (e.target === modal) window.__closeModal(); });
+    modal.addEventListener('click', (e)=>{
+      if (e.target === modal) window.__closeModal();
+    });
     modal.addEventListener('click', (e)=>{
       const closeBtn = e.target.closest('[data-action="close"],[data-action="cancel"],[data-action="dismiss"]');
       const saveBtn  = e.target.closest('[data-action="save"],[data-action="ok"],[data-action="apply"]');
       if (closeBtn || saveBtn) window.__closeModal();
     });
   }
-  document.addEventListener('keydown', (e)=>{ if (e.key === 'Escape' && isOpen()) window.__closeModal(); });
+  document.addEventListener('keydown', (e)=>{
+    if (e.key === 'Escape' && isOpen()) window.__closeModal();
+  });
 })();
 
 /* -----------------------------
