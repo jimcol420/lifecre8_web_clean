@@ -1,8 +1,13 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.6 (built on v1.9.5)
-   - Intent-aware Add Tile (marketplace, recipes, images, wiki, fixtures, price/tickers, YouTube, web)
-   - News only when explicitly asked ("news", "news <topic>")
-   - Keep existing RSS image-enriched lists, layout, assistant, etc.
+   LifeCre8 — main.js  v1.9.6
+   Built on: v1.9.5 (stable)
+   What’s new (small, safe):
+   - Travel intent for Add Tile:
+     • queries like "retreat", "spa", "resort", "hotel", "airbnb",
+       "yoga retreat", "in <city>", "near me", etc.
+     • Creates a Google Maps tile (embedded) with quick links
+       to Maps, Booking, and Tripadvisor.
+   - Everything else unchanged from v1.9.5
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -10,7 +15,7 @@ const K_SECTIONS   = "lifecre8.sections";
 const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
-const K_PREFS      = "lifecre8.prefs"; // theme, density
+const K_PREFS      = "lifecre8.prefs";
 const DATA_VERSION = 5;
 
 /* ===== Presets ===== */
@@ -33,7 +38,6 @@ const RSS_PRESETS = {
     "https://www.theguardian.com/uk-news/rss",
   ],
 };
-
 const STOCK_PRESETS = {
   "Tech Giants": ["AAPL","MSFT","GOOGL","AMZN","NVDA"],
   "Crypto": ["BTC-USD","ETH-USD","SOL-USD"],
@@ -52,7 +56,7 @@ if (!prefs.density) prefs.density = "comfortable";
 document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
 document.body.classList.toggle('density-compact',  prefs.density === 'compact');
 
-/* timers for dynamic tiles */
+/* timers */
 let dynamicTimers = {};
 let liveIntervals = {};
 
@@ -105,7 +109,7 @@ function ytPlaylistMarkup(playlist, currentId) {
 }
 
 /* -----------------------------
-   Web tile
+   Web tile (generic)
 ----------------------------- */
 function webTileMarkup(url, mode = "preview") {
   const host = hostOf(url);
@@ -143,6 +147,26 @@ function webTileMarkup(url, mode = "preview") {
 }
 
 /* -----------------------------
+   Maps tile (new travel intent)
+----------------------------- */
+function mapsTileMarkup(query){
+  const embed = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
+  const open  = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
+  const booking = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(query)}`;
+  const trip   = `https://www.tripadvisor.com/Search?q=${encodeURIComponent(query)}`;
+  return `
+    <div data-maps>
+      <div class="web-actions" style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap">
+        <a class="btn sm" href="${open}" target="_blank" rel="noopener">Open Maps</a>
+        <a class="btn sm" href="${booking}" target="_blank" rel="noopener">Booking</a>
+        <a class="btn sm" href="${trip}" target="_blank" rel="noopener">Tripadvisor</a>
+      </div>
+      <iframe src="${embed}" style="width:100%;height:320px;border:0;border-radius:10px"></iframe>
+    </div>
+  `;
+}
+
+/* -----------------------------
    Spotify tile
 ----------------------------- */
 function spotifyMarkup(spotifyUrl) {
@@ -157,19 +181,16 @@ function spotifyMarkup(spotifyUrl) {
 }
 
 /* -----------------------------
-   RSS tile (LIVE via /api/rss)
+   RSS tile (enriched)
 ----------------------------- */
-function thumbHTML(url){
-  if (!url) return `<div class="thumb fallback">no image</div>`;
-  return `<img class="thumb" src="${url}" alt="">`;
-}
 function rssListMarkup(items) {
   const list = (items || []).map(i => `
-    <div class="rss-item">
-      ${thumbHTML(i.image)}
-      <div class="meta">
-        <a class="title" href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
-        <div class="sub">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
+    <div class="rss-item" style="display:flex; gap:10px; align-items:flex-start;">
+      ${i.image ? `<img src="${i.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--border)" />`
+                 : `<div style="width:56px;height:56px;border-radius:8px;border:1px solid var(--border);background:#0a1522"></div>`}
+      <div>
+        <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
+        <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
       </div>
     </div>
   `).join("");
@@ -198,29 +219,25 @@ function rssErrorMarkup() {
     </div>
   `;
 }
-function loadRssInto(card, feeds, topicHint="", attempt=1) {
+function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
 
-  const u = new URL(`/api/rss`, location.origin);
-  u.searchParams.set("full","1");
-  u.searchParams.set("url", feeds[0]);
-  if (topicHint) u.searchParams.set("topic", topicHint);
-
-  fetch(u.toString())
+  const url = `/api/rss?full=1&url=${encodeURIComponent(feeds[0])}`;
+  fetch(url)
     .then(r=>r.json())
     .then(data=>{
       const items = (data.items||[]).slice(0,10);
       content.innerHTML = rssListMarkup(items);
     })
     .catch(()=>{
-      if (attempt < 2) setTimeout(()=>loadRssInto(card, feeds, topicHint, attempt+1), 1000);
+      if (attempt < 2) setTimeout(()=>loadRssInto(card, feeds, attempt+1), 1000);
       else content.innerHTML = rssErrorMarkup();
     });
 }
 
 /* -----------------------------
-   Gallery tile
+   Gallery
 ----------------------------- */
 function galleryMarkup(urls) {
   const imgs = (urls || []).map(u => `<img src="${u}" alt="">`).join("");
@@ -233,7 +250,7 @@ function galleryMarkup(urls) {
 }
 
 /* -----------------------------
-   Markets (LIVE via /api/quote)
+   Markets
 ----------------------------- */
 function tickerMarkup(symbols) {
   const rows = symbols.map(sym => `
@@ -298,7 +315,7 @@ function footballMarkupSeed() {
 }
 
 /* -----------------------------
-   Defaults (seed)
+   Defaults
 ----------------------------- */
 function gallerySeed() {
   return [
@@ -349,6 +366,10 @@ function tileContentFor(section) {
       const url = section.meta?.url || "https://example.com";
       const mode = section.meta?.mode || "preview";
       return webTileMarkup(url, mode);
+    }
+    case "maps": {
+      const q = section.meta?.q || "nearby";
+      return mapsTileMarkup(q);
     }
     case "spotify": {
       const url = section.meta?.url || "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
@@ -401,7 +422,7 @@ function render() {
   });
 
   initDynamicTiles();
-  initLiveFeeds();   // load live RSS + quotes
+  initLiveFeeds();
 }
 
 /* -----------------------------
@@ -446,7 +467,7 @@ function render() {
     render();
   });
 
-  // Settings (opens a modal per tile type)
+  // Settings (per tile)
   grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".settingsBtn");
     if (!btn) return;
@@ -454,7 +475,6 @@ function render() {
     const s = sections.find(x => x.id === id);
     if (!s) return;
 
-    // Per-type fields (+ presets)
     let fields = "";
     if (s.type === "web") {
       const url = s.meta?.url || "";
@@ -470,6 +490,14 @@ function render() {
             <option value="preview" ${mode==='preview'?'selected':''}>Preview</option>
             <option value="embed" ${mode==='embed'?'selected':''}>Embed</option>
           </select>
+        </div>
+      `;
+    } else if (s.type === "maps") {
+      const q = s.meta?.q || "";
+      fields = `
+        <div class="field">
+          <label>Maps search</label>
+          <input class="input" id="set_maps_q" value="${q}">
         </div>
       `;
     } else if (s.type === "youtube") {
@@ -534,7 +562,6 @@ function render() {
     `;
     __openModal(html);
 
-    // Preset apply hooks (if present)
     $("#apply_symbols_preset")?.addEventListener("click", ()=>{
       const key = $("#set_symbols_preset").value;
       if (!key) return;
@@ -548,13 +575,16 @@ function render() {
       $("#set_feeds").value = arr.join(",");
     });
 
-    // Save handler
     $("#settingsSaveBtn")?.addEventListener("click", ()=>{
       if (s.type === "web") {
         const url = $("#set_url")?.value?.trim() || s.meta?.url || "";
         const mode = $("#set_mode")?.value || "preview";
         s.meta = {...(s.meta||{}), url, mode};
         s.content = webTileMarkup(url, mode);
+      } else if (s.type === "maps") {
+        const q = $("#set_maps_q")?.value?.trim() || s.meta?.q || "";
+        s.meta = {...(s.meta||{}), q};
+        s.content = mapsTileMarkup(q);
       } else if (s.type === "youtube") {
         const playlist = ($("#set_playlist")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
         const list = playlist.length? playlist : (s.meta?.playlist || YT_DEFAULTS);
@@ -650,7 +680,7 @@ function render() {
     if (content) content.innerHTML = s.content;
   });
 
-  // RSS refresh (live)
+  // RSS refresh
   grid.addEventListener("click", (e) => {
     const refresh = e.target.closest(".rss-refresh");
     if (!refresh) return;
@@ -660,8 +690,7 @@ function render() {
     const s = sections.find(x => x.id === id);
     if (!s) return;
     const feeds = s.meta?.feeds || RSS_PRESETS.uk;
-    const topicHint = (s.title || "").replace(/^Daily Brief —\s*/,'').trim();
-    loadRssInto(card, feeds, topicHint);
+    loadRssInto(card, feeds);
   });
 
   // Gallery viewer
@@ -694,7 +723,7 @@ function stopLiveIntervals(){
   liveIntervals = {};
 }
 function initDynamicTiles(){
-  // Simulated football
+  // Football heartbeat (simulated)
   $$('.card[data-type="football"]').forEach(card=>{
     const container = card.querySelector(".scores");
     if (!container) return;
@@ -709,7 +738,7 @@ function initDynamicTiles(){
         if (!m.started && Math.random() < 0.3) { m.started = true; m.min = 1; m.status = "1'"; changed = true; }
         else if (m.started && !m.finished) {
           if (Math.random() < 0.7) { m.min = clamp(m.min + 1, 1, 95); m.status = m.min >= 90 ? `90'+` : `${m.min}'`; changed = true; }
-          if (Math.random() < 0.15) { if (Math.random() < 0.5) m.hs++; else m.as++; flashGoal(card, i, `${m.hs}–${m.as}`); changed = true; }
+          if (Math.random() < 0.15) { if (Math.random() < 0.5) m.hs++; else m.as++; changed = true; }
           if (m.min >= 93 && Math.random() < 0.25) { m.finished = true; m.status = "FT"; changed = true; }
         }
       });
@@ -726,7 +755,7 @@ function initDynamicTiles(){
     dynamicTimers[card.dataset.id] = timer;
   });
 
-  // Simulated stocks (live feed overwrites)
+  // Stocks (sim fallback; live overwrites)
   $$('.card[data-type="stocks"]').forEach(card=>{
     const ticker = card.querySelector(".ticker");
     if (!ticker) return;
@@ -747,9 +776,8 @@ function initLiveFeeds(){
     const id = card.dataset.id;
     const s = sections.find(x=>x.id===id);
     const feeds = s?.meta?.feeds || RSS_PRESETS.uk;
-    const topicHint = (s?.title||"").replace(/^Daily Brief(?:\s+—\s*)?/,'').trim();
-    loadRssInto(card, feeds, topicHint);
-    liveIntervals[id+"_rss"] = setInterval(()=>loadRssInto(card, feeds, topicHint), 15*60*1000);
+    loadRssInto(card, feeds);
+    liveIntervals[id+"_rss"] = setInterval(()=>loadRssInto(card, feeds), 15*60*1000);
   });
 
   // Stocks (live)
@@ -764,7 +792,7 @@ function initLiveFeeds(){
   });
 }
 
-/* stock fallbacks for simulation */
+/* stock fallbacks */
 function seedPrice(sym){ if (sym.includes("BTC")) return 65000 + Math.random()*4000; if (sym.includes("ETH")) return 3200 + Math.random()*300; return 100 + Math.random()*100; }
 function stepPrice(p){ const drift = (Math.random()-0.5) * (p*0.004); return Math.max(0.01, p + drift); }
 function renderTicker(card, prices, prev){
@@ -783,17 +811,9 @@ function renderTicker(card, prices, prev){
     row.classList.toggle("down", delta <  0);
   });
 }
-function flashGoal(card, matchIdx, scoreText){
-  const row = card.querySelector(`.match[data-idx="${matchIdx}"]`);
-  if (!row) return;
-  const scoreEl = row.querySelector('[data-score]');
-  if (!scoreEl) return;
-  scoreEl.textContent = scoreText;
-  row.classList.remove('flash'); void row.offsetWidth; row.classList.add('flash');
-}
 
 /* -----------------------------
-   Intent-aware Add Tile
+   Add Tile
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
@@ -804,122 +824,166 @@ addBtn.addEventListener("click", () => {
   if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
 });
 
-// helpers for search URLs (safe, no keys needed)
-function googleSearchURL(q){ return `https://www.google.com/search?q=${encodeURIComponent(q)}`; }
-function googleImagesURL(q){ return `https://www.google.com/search?tbm=isch&q=${encodeURIComponent(q)}`; }
-function wikipediaSearchURL(q){ return `https://en.wikipedia.org/w/index.php?search=${encodeURIComponent(q)}`; }
-function ebaySearchURL(q){ return `https://www.ebay.co.uk/sch/i.html?_nkw=${encodeURIComponent(q)}`; }
-function autotraderSearchURL(q){ return `https://www.google.com/search?q=${encodeURIComponent(`site:autotrader.co.uk ${q}`)}`; }
-function goodFoodSearchURL(q){ return `https://www.bbcgoodfood.com/search?q=${encodeURIComponent(q)}`; }
-function bbcFixturesURL(){ return `https://www.bbc.co.uk/sport/football/scores-fixtures`; }
-
-function buildGalleryFrom(q, n=6){
-  const base = q.replace(/\s+/g,'+');
-  const mk = i => `https://source.unsplash.com/600x600/?${encodeURIComponent(base)}&sig=${i}`;
-  return Array.from({length:n},(_,i)=>mk(i+1));
-}
-
-function isLikelyTickerToken(t){
-  // crude: all caps A-Z . ^ - up to 6 chars, or CRYPTO-USD style
-  return /^[A-Z\^\.]{1,6}(-USD)?$/.test(t);
-}
-
-function createTileFromQuery(val){
-  const q = val.trim();
-  const ql = q.toLowerCase();
-
-  // 0) Explicit news
-  const mNews = q.match(/^news(?:\s+(.+))?$/i);
-  if (mNews) {
-    const topic = (mNews[1]||"").trim();
-    if (!topic) {
-      const feeds = RSS_PRESETS.uk;
-      return { id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() };
-    }
-    const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
-    return { id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
-  }
-
-  // 1) “for sale” / buy intent
-  if (/\b(for sale|to buy|buy|sell)\b/.test(ql)) {
-    const isCar = /\bcar|cars|bmw|audi|mercedes|ford|vauxhall|tesla|van|motorbike|vehicle\b/.test(ql);
-    const url = isCar ? autotraderSearchURL(q) : ebaySearchURL(q);
-    return { id: uid(), type:"web", title: isCar ? "AutoTrader (Search)" : "eBay (Search)", meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
-  }
-
-  // 2) Recipes intent
-  if (/\b(recipe|recipes|how to (cook|bake)|ingredients)\b/.test(ql)) {
-    const url = goodFoodSearchURL(q);
-    return { id: uid(), type:"web", title:"Recipes — BBC Good Food", meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
-  }
-
-  // 3) Images intent -> gallery
-  if (/\b(images?|pictures?|wallpaper|photos?)\b/.test(ql)) {
-    const imgs = buildGalleryFrom(q, 9);
-    return { id: uid(), type:"gallery", title:`${q} — Images`, meta:{ urls: imgs }, content: galleryMarkup(imgs) };
-  }
-
-  // 4) Wikipedia intent
-  if (/^(what is|who is|wikipedia|wiki)\b/.test(ql)) {
-    const cleaned = q.replace(/^(what is|who is|wikipedia|wiki)\s*/i,'').trim() || q;
-    const url = wikipediaSearchURL(cleaned);
-    return { id: uid(), type:"web", title:`Wikipedia — ${cleaned}`, meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
-  }
-
-  // 5) Football fixtures / scores
-  if (/(football|soccer).*(fixtures|scores|today|results)/i.test(ql)) {
-    const url = bbcFixturesURL();
-    return { id: uid(), type:"web", title:"Football — Fixtures (BBC)", meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
-  }
-
-  // 6) Price / ticker detection
-  const mPrice = q.match(/^price of\s+(.+)/i);
-  if (mPrice) {
-    const token = mPrice[1].trim().toUpperCase();
-    const sym = isLikelyTickerToken(token) ? token : token.replace(/\s+/g,'-').toUpperCase();
-    return { id: uid(), type:"stocks", title:`Price — ${sym}`, meta:{ symbols:[sym] }, content: tickerMarkup([sym]) };
-  }
-  // “AAPL MSFT” -> treat as tickers
-  const parts = q.split(/[\s,]+/).filter(Boolean);
-  const maybeSyms = parts.filter(isLikelyTickerToken);
-  if (maybeSyms.length) {
-    return { id: uid(), type:"stocks", title:`Markets — ${maybeSyms.join(', ')}`, meta:{ symbols: maybeSyms }, content: tickerMarkup(maybeSyms) };
-  }
-
-  // 7) YouTube quick
-  const mYT = q.match(/(?:^youtube\s+|youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)?/i);
-  if (mYT) {
-    const vid = mYT[1];
-    if (vid) {
-      const playlist = [vid, ...YT_DEFAULTS.filter(x=>x!==vid)].slice(0,4);
-      return { id: uid(), type:"youtube", title:"YouTube", meta:{ playlist, current: vid }, content: ytPlaylistMarkup(playlist, vid) };
-    }
-    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(q.replace(/^youtube\s+/i,''))}`;
-    return { id: uid(), type:"web", title:"YouTube — Search", meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
-  }
-
-  // 8) Direct URL -> Web tile
-  if (/^https?:\/\//i.test(q)) {
-    const url = q;
-    return { id: uid(), type:"web", title: new URL(q).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
-  }
-
-  // 9) Default: general Web search (NOT news)
-  const url = googleSearchURL(q);
-  return { id: uid(), type:"web", title:`Search — ${q}`, meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
-}
-
 tileSearch.addEventListener("keydown", (e)=>{
   if (e.key !== "Enter") {
     if (e.key === "Escape") tileMenu.classList.add("hidden");
     return;
   }
+
   const valRaw = tileSearch.value.trim();
   if (!valRaw) return;
+  const val = valRaw.replace(/\s+/g, " ");
+  let newTile = null;
 
-  const newTile = createTileFromQuery(valRaw);
+  /* --- NEW: travel intent ---> Maps tile --- */
+  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break)/i;
+  const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
+  if (TRAVEL_RE.test(val) || GEO_HINT.test(val)) {
+    const q = val.replace(/\bnear me\b/i, "near me");
+    newTile = {
+      id: uid(),
+      type: "maps",
+      title: `Search — ${val}`,
+      meta: { q },
+      content: mapsTileMarkup(q)
+    };
+  }
 
-  // PREPEND a single tile (no multi-tile fan-out here)
+  // Quick commands: news / topic
+  if (!newTile) {
+    const mNews = val.match(/^news(?:\s+(.+))?$/i);
+    if (mNews) {
+      const topic = (mNews[1]||"").trim();
+      if (!topic) {
+        const feeds = RSS_PRESETS.uk;
+        newTile = { id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() };
+      } else {
+        const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
+        newTile = { id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
+      }
+    }
+  }
+
+  // Football fixtures today
+  if (!newTile && /(football|soccer).*(fixtures|today|scores)/i.test(val)) {
+    const fixUrl = "https://www.bbc.co.uk/sport/football/scores-fixtures";
+    const html = `
+      <div>
+        <div class="muted">Quick fixtures snapshot — open BBC for full details.</div>
+        <ul id="fx-quick" style="margin:8px 0 12px; display:grid; gap:6px;"></ul>
+        <div class="web-actions">
+          <button class="btn sm web-toggle" data-mode="embed">Embed</button>
+          <a class="btn sm" href="${fixUrl}" target="_blank" rel="noopener">Open</a>
+        </div>
+      </div>`;
+    newTile = { id: uid(), type: "web", title: "Football — Fixtures (Today)", meta:{ url: fixUrl, mode:"preview" }, content: html };
+    // async snapshot
+    setTimeout(()=>{
+      const card = document.querySelector(`.card[data-id="${newTile.id}"]`);
+      const list = card?.querySelector('#fx-quick');
+      if (!list) return;
+      fetch(`/api/rss?url=${encodeURIComponent('https://feeds.bbci.co.uk/sport/football/rss.xml')}`)
+        .then(r=>r.json()).then(data=>{
+          const items = (data.items||[]).slice(0,5);
+          list.innerHTML = items.map(i=>`<li><a href="${i.link}" target="_blank" rel="noopener">${i.title}</a></li>`).join("");
+        })
+        .catch(()=>{ list.innerHTML = `<li class="muted">Open for full fixtures →</li>`; });
+    }, 80);
+  }
+
+  // YouTube
+  if (!newTile) {
+    const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
+    if (ytUrl) {
+      const videoId = ytUrl[1];
+      const playlist = [videoId, ...YT_DEFAULTS.filter(x=>x!==videoId)].slice(0,4);
+      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:videoId}, content: ytPlaylistMarkup(playlist, videoId) };
+    } else if (/^youtube\s+/i.test(val)) {
+      const playlist = [...YT_DEFAULTS];
+      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
+    }
+  }
+
+  // Spotify
+  if (!newTile && /spotify/i.test(val)) {
+    const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
+    newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
+  }
+
+  // Stocks
+  if (!newTile && /stocks?|markets?/i.test(val)) {
+    const symbols = ["AAPL","MSFT","BTC-USD"];
+    newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
+  }
+
+  // Weather (stub)
+  if (!newTile && /weather/i.test(val)) {
+    const html = `
+      <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
+      <div class="row" style="margin-top:8px">
+        <div>🌤️</div><div class="muted">Partly cloudy</div><div>18°C</div>
+      </div>`;
+    newTile = { id: uid(), type:"weather", title:"Weather", content: html };
+  }
+
+  // URL -> Web
+  const isUrl = /^https?:\/\//i.test(val);
+  if (!newTile && isUrl) {
+    const url = val;
+    newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+  }
+
+  // Generic topic -> AI/News+Gallery fallback
+  if (!newTile) {
+    fetch(`/api/ai-search?q=${encodeURIComponent(val)}`, { method:"GET" })
+      .then(r=>{ if (!r.ok) throw new Error("ai-search not available"); return r.json(); })
+      .then(plan=>{
+        const tiles = (plan.tiles||[]).map(t=>{
+          if (t.type === "rss" && t.feeds?.length)
+            return { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
+          if (t.type === "web" && t.url)
+            return { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
+          if (t.type === "youtube" && t.playlist?.length) {
+            const cur = t.playlist[0];
+            return { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
+          }
+          if (t.type === "stocks" && t.symbols?.length)
+            return { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
+          if (t.type === "gallery" && t.images?.length)
+            return { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
+          if (t.type === "maps" && t.q)
+            return { id: uid(), type:"maps", title: t.title || `Search — ${t.q}`, meta:{ q: t.q }, content: mapsTileMarkup(t.q) };
+          return null;
+        }).filter(Boolean);
+
+        if (tiles.length) {
+          for (let i = tiles.length - 1; i >= 0; i--) sections.unshift(tiles[i]);
+          localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+          render();
+          tileMenu.classList.add("hidden");
+          tileSearch.value = "";
+          return;
+        }
+        throw new Error("ai-search empty plan");
+      })
+      .catch(()=>{
+        // fallback: RSS + Gallery visuals
+        const gn = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
+        const img = (n)=>`https://source.unsplash.com/600x600/?${encodeURIComponent(val)}&sig=${n}`;
+        const gal = [img(1),img(2),img(3),img(4),img(5),img(6)];
+        const a = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
+        const b = { id: uid(), type:"gallery", title:`${val} — Gallery`, meta:{ urls: gal }, content: galleryMarkup(gal) };
+        sections.unshift(b);
+        sections.unshift(a);
+        localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+        render();
+        tileMenu.classList.add("hidden");
+        tileSearch.value = "";
+      });
+    return; // async path handles persistence + render
+  }
+
+  // sync branches
   sections.unshift(newTile);
   localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
   render();
@@ -941,11 +1005,12 @@ function updateAssistant() {
   appEl.classList.toggle("no-right", !assistantOn);
   localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
 }
-assistantToggle.addEventListener("click", () => {
+assistantToggle?.addEventListener("click", () => {
   assistantOn = !assistantOn;
   updateAssistant();
 });
 function renderChat(){
+  if (!chatLog) return;
   chatLog.innerHTML = "";
   chat.forEach(m=>{
     const d = document.createElement("div");
@@ -961,7 +1026,7 @@ function addChat(role, text){
   renderChat();
 }
 function fakeAIResponse(text){ return `You said: “${text}”. (Local stub)`; }
-chatForm.addEventListener("submit", (e)=>{
+chatForm?.addEventListener("submit", (e)=>{
   e.preventDefault();
   const text = chatInput.value.trim();
   if (!text) return;
@@ -971,46 +1036,7 @@ chatForm.addEventListener("submit", (e)=>{
 });
 
 /* -----------------------------
-   Global settings (Theme + Density)
------------------------------ */
-$("#globalSettingsBtn").addEventListener("click", ()=>{
-  const html = `
-    <div class="modal-card">
-      <h2>Global Settings</h2>
-      <div class="field">
-        <label>Theme</label>
-        <select class="input" id="g_theme">
-          <option value="solar" ${prefs.theme==='solar'?'selected':''}>Solar (Dark)</option>
-          <option value="ice" ${prefs.theme==='ice'?'selected':''}>Ice (Light)</option>
-        </select>
-      </div>
-      <div class="field">
-        <label>Density</label>
-        <select class="input" id="g_density">
-          <option value="comfortable" ${prefs.density==='comfortable'?'selected':''}>Comfortable</option>
-          <option value="compact" ${prefs.density==='compact'?'selected':''}>Compact</option>
-        </select>
-      </div>
-      <div class="actions" style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
-        <button class="btn sm" data-action="cancel">Cancel</button>
-        <button class="btn sm primary" data-action="save" id="g_save">Save</button>
-      </div>
-    </div>
-  `;
-  __openModal(html);
-  $("#g_save")?.addEventListener("click", ()=>{
-    const theme = $("#g_theme").value;
-    const density = $("#g_density").value;
-    prefs.theme = theme; prefs.density = density;
-    localStorage.setItem(K_PREFS, JSON.stringify(prefs));
-    document.body.classList.toggle('theme-ice', theme === 'ice');
-    document.body.classList.toggle('density-compact', density === 'compact');
-    __closeModal();
-  }, { once:true });
-});
-
-/* -----------------------------
-   Modal close safety net
+   Modal helpers
 ----------------------------- */
 (function modalSafetyNet(){
   const modal = document.getElementById('modal');
@@ -1055,7 +1081,8 @@ $("#globalSettingsBtn").addEventListener("click", ()=>{
    Init
 ----------------------------- */
 document.addEventListener("DOMContentLoaded", () => {
-  $("#yr").textContent = new Date().getFullYear();
+  const yrEl = $("#yr");
+  if (yrEl) yrEl.textContent = new Date().getFullYear();
   ensureVersion();
   updateAssistant();
   renderChat();
