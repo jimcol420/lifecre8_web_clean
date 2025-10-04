@@ -1,103 +1,106 @@
-// @ts-nocheck
-// Simple, dependency-free planner that returns ONE best-fit tile.
-// Request:  GET /api/ai-plan?q=<query>
-// Response: { message: string, tile: { type: "...", ... } }
-
+/* ============================================================
+   LifeCre8 — api/ai-plan.js  v1.9.8
+   Returns ONE best-fit tile for query q.
+   Response shape: { message, tiles: [{ type, ...meta }] }
+============================================================ */
 export default async function handler(req, res) {
   try {
-    const q = (req.query?.q || req.body?.q || "").toString().trim();
-    if (!q) {
-      res.status(200).json({ message: "Tell me what you want and I’ll make a tile for it.", tile: null });
-      return;
-    }
+    const q = ((req.query && req.query.q) || (req.body && req.body.q) || "")
+      .toString()
+      .trim();
+    if (!q) return res.status(200).json({ message: "Empty query", tiles: [] });
 
     const lower = q.toLowerCase();
 
-    // 1) Travel → maps
-    const travelRe = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|near me|in\s+[a-z])/i;
+    // 1) TRAVEL (dominates)
+    const travelRe = /(holiday|holidays|city\s*break|weekend\s*(away)?|retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|things to do|places to visit|near me|in\s+[a-z])/i;
     if (travelRe.test(lower)) {
-      res.status(200).json({
-        message: "Travel/search intent detected — added a Maps tile.",
-        tile: { type:"maps", q, title:`Search — ${q}` }
+      return res.status(200).json({
+        message: "Travel intent — Maps tile",
+        tiles: [{ type: "maps", q, title: `Search — ${q}` }],
       });
-      return;
     }
 
-    // 2) Recipes → rss (food blogs) or web search
-    if (/(recipe|cook|bake|cake|dinner|lunch|breakfast)/i.test(lower)) {
+    // 2) RECIPES
+    if (/(recipe|cook|bake|cake|dessert|dinner|lunch|breakfast)/i.test(lower)) {
       const feed = `https://news.google.com/rss/search?q=${encodeURIComponent(q + " recipe")}&hl=en-GB&gl=GB&ceid=GB:en`;
-      res.status(200).json({
-        message: "Food/recipe intent — added a curated Daily Brief for recipes.",
-        tile: { type:"rss", feeds:[feed], title:`Recipes — ${q}` }
+      return res.status(200).json({
+        message: "Recipe intent — Daily Brief",
+        tiles: [{ type: "rss", feeds: [feed], title: `Recipes — ${q}` }],
       });
-      return;
     }
 
-    // 3) Shopping → web search
-    if (/(buy|for sale|price|best|review|compare|deal)/i.test(lower)) {
-      const url = `https://www.google.com/search?q=${encodeURIComponent(q)}`;
-      res.status(200).json({
-        message: "Shopping intent — added a search tile you can open/emb ed.",
-        tile: { type:"web", url, title:`Search — ${q}` }
+    // 3) SHOPPING
+    if (/(buy|for sale|price|best|review|compare|deal)s?/i.test(lower)) {
+      return res.status(200).json({
+        message: "Shopping intent — Search tile",
+        tiles: [{
+          type: "web",
+          url: `https://www.google.com/search?q=${encodeURIComponent(q)}`,
+          title: `Search — ${q}`,
+        }],
       });
-      return;
     }
 
-    // 4) YouTube request
+    // 4) YOUTUBE
     if (/^youtube /.test(lower) || /watch\?v=|youtu\.be\//.test(lower)) {
-      const urlId = (q.match(/(?:watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/) || [])[1];
-      const playlist = urlId ? [urlId] : ["M7lc1UVf-VE","5qap5aO4i9A","jfKfPfyJRdk"];
-      res.status(200).json({
-        message: "YouTube tile created.",
-        tile: { type:"youtube", playlist }
+      const idMatch = q.match(/(?:watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/);
+      const vid = idMatch ? idMatch[1] : null;
+      const playlist = vid ? [vid] : ["M7lc1UVf-VE", "5qap5aO4i9A", "jfKfPfyJRdk"];
+      return res.status(200).json({
+        message: "YouTube tile",
+        tiles: [{ type: "youtube", playlist, title: "YouTube" }],
       });
-      return;
     }
 
-    // 5) News explicit
+    // 5) Explicit "news ..."
     const mNews = q.match(/^news(?:\s+(.+))?$/i);
     if (mNews) {
-      const topic = (mNews[1]||"").trim();
+      const topic = (mNews[1] || "").trim();
       const feeds = topic
         ? [`https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`]
-        : [
-            "https://feeds.bbci.co.uk/news/rss.xml",
-            "https://www.theguardian.com/uk-news/rss"
-          ];
-      res.status(200).json({
-        message: "Daily Brief added.",
-        tile: { type:"rss", feeds, title: topic ? `Daily Brief — ${topic}` : "Daily Brief" }
+        : ["https://feeds.bbci.co.uk/news/rss.xml", "https://www.theguardian.com/uk-news/rss"];
+      return res.status(200).json({
+        message: "Daily Brief",
+        tiles: [{ type: "rss", feeds, title: topic ? `Daily Brief — ${topic}` : "Daily Brief" }],
       });
-      return;
     }
 
-    // 6) If it looks like an imagey topic → gallery (unsplash)
-    if (/(wallpaper|inspiration|ideas|design|nature|landscape|architecture|art|cars?|animals?)/i.test(lower)) {
-      const base = "https://source.unsplash.com/featured/?";
-      const pics = Array.from({length:8}, (_,i)=> `${base}${encodeURIComponent(q)}&sig=${i}`);
-      res.status(200).json({
-        message: "Gallery tile created.",
-        tile: { type:"gallery", images: pics, title:`Gallery — ${q}` }
+    // 6) Visual-only intents (gallery)
+    if (/(wallpaper|aesthetic|moodboard|logo\s+ideas?|poster\s+ideas?|reference\s+sheet|concept\s+art)/i.test(lower)) {
+      const base = "https://source.unsplash.com/600x400/?";
+      const images = Array.from({ length: 8 }, (_, i) => `${base}${encodeURIComponent(q)}&sig=${i}`);
+      return res.status(200).json({
+        message: "Gallery tile",
+        tiles: [{ type: "gallery", images, title: `Gallery — ${q}` }],
       });
-      return;
     }
 
-    // 7) Default: intelligent web + a news feed if it reads like a topic
-    const looksLikeTopic = /\s/.test(lower) && lower.length > 8;
-    if (looksLikeTopic) {
-      res.status(200).json({
-        message: "Topic detected — curated Daily Brief added.",
-        tile: { type:"rss", feeds:[`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`], title:`Daily Brief — ${q}` }
+    // 7) General topic → Daily Brief
+    if (/\s/.test(lower) && lower.length > 8) {
+      return res.status(200).json({
+        message: "Topic — Daily Brief",
+        tiles: [{
+          type: "rss",
+          feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`],
+          title: `Daily Brief — ${q}`,
+        }],
       });
-      return;
     }
 
-    // 8) Fallback strict web search
-    res.status(200).json({
-      message: "Search tile added.",
-      tile: { type:"web", url:`https://www.google.com/search?q=${encodeURIComponent(q)}`, title:`Search — ${q}` }
+    // 8) Fallback: Web search
+    return res.status(200).json({
+      message: "Fallback — Search tile",
+      tiles: [{
+        type: "web",
+        url: `https://www.google.com/search?q=${encodeURIComponent(q)}`,
+        title: `Search — ${q}`,
+      }],
     });
   } catch (e) {
-    res.status(200).json({ message: "Planner error; adding a search tile.", tile: { type:"web", url:"https://www.google.com", title:"Search …" } });
+    return res.status(200).json({
+      message: "Planner error — search tile",
+      tiles: [{ type: "web", url: "https://www.google.com", title: "Search …" }],
+    });
   }
 }

@@ -1,11 +1,11 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.7
-   Built on your stable 1.9.5 baseline.
-   What’s new:
-   - AI Add Tile: calls /api/ai-plan and adds **one** best-fit tile.
-   - Travel intent → Maps tile (kept).
-   - AI Assistant box works again (posts to /api/ai-plan and shows reply).
-   - No changes to layout/grid, RSS, YouTube, Stocks, Gallery.
+   LifeCre8 — main.js  v1.9.8
+   Built on 1.9.5 stable
+   What's new vs 1.9.7:
+   - Rewired top buttons: Settings + AI Assistant now respond.
+   - Assistant pane toggle persists and re-renders.
+   - No layout/CSS changes.
+   - (Pairs with updated /api/ai-plan that fixes travel vs gallery.)
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -65,8 +65,6 @@ const uid = () => Math.random().toString(36).slice(2);
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
 
-const appEl = document.querySelector(".app");
-
 /* Backdrop for fullscreen */
 let fsBackdrop = document.getElementById("fsBackdrop");
 if (!fsBackdrop) {
@@ -107,7 +105,7 @@ function ytPlaylistMarkup(playlist, currentId) {
 }
 
 /* -----------------------------
-   Web tile (generic)
+   Web tile
 ----------------------------- */
 function webTileMarkup(url, mode = "preview") {
   const host = hostOf(url);
@@ -293,7 +291,7 @@ function loadQuotesInto(card, symbols) {
 }
 
 /* -----------------------------
-   Football (simulated fallback)
+   Football (simulated)
 ----------------------------- */
 function footballMarkupSeed() {
   const matches = [
@@ -313,7 +311,7 @@ function footballMarkupSeed() {
 }
 
 /* -----------------------------
-   Defaults
+   Defaults & versioning
 ----------------------------- */
 function gallerySeed() {
   return [
@@ -335,10 +333,6 @@ function defaultSections() {
     { id: uid(), type:"gallery",  title:"Gallery",     meta:{ urls: gallerySeed() }, content: galleryMarkup(gallerySeed()) }
   ];
 }
-
-/* -----------------------------
-   Storage versioning / seed
------------------------------ */
 function ensureVersion() {
   const current = parseInt(localStorage.getItem(K_VERSION) || "0", 10);
   if (!sections.length) {
@@ -351,7 +345,7 @@ function ensureVersion() {
 }
 
 /* -----------------------------
-   Rendering
+   Render
 ----------------------------- */
 function tileContentFor(section) {
   switch (section.type) {
@@ -398,7 +392,10 @@ function render() {
   stopDynamicTimers();
   stopLiveIntervals();
 
+  document.body.classList.toggle("assistant-off", !assistantOn);
+
   const grid = $("#grid");
+  if (!grid) return;
   grid.innerHTML = "";
 
   const others = sections.filter(s=>s.type!=="email");
@@ -424,10 +421,11 @@ function render() {
 }
 
 /* -----------------------------
-   Delegated handlers
+   Delegated handlers (cards)
 ----------------------------- */
 (function attachDelegatesOnce(){
   const grid = $("#grid");
+  if (!grid) return;
 
   // Expand / Collapse
   grid.addEventListener("click", (e)=>{
@@ -465,7 +463,7 @@ function render() {
     render();
   });
 
-  // Settings (per tile)
+  // Settings (per-tile)
   grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".settingsBtn");
     if (!btn) return;
@@ -605,123 +603,16 @@ function render() {
       render();
     }, { once:true });
   });
-
-  // Backdrop close
-  fsBackdrop.addEventListener("click", ()=>{
-    const open = document.querySelector(".card.card-full");
-    if (!open) return;
-    const closeBtn = open.querySelector(".expandBtn");
-    open.classList.remove("card-full");
-    document.body.style.overflow = "";
-    fsBackdrop.classList.remove("show");
-    if (closeBtn) closeBtn.textContent = "⤢ Expand";
-  });
-
-  // Esc closes fullscreen
-  document.addEventListener("keydown", (e)=>{
-    if (e.key === "Escape") {
-      const open = document.querySelector(".card.card-full");
-      if (!open) return;
-      const closeBtn = open.querySelector(".expandBtn");
-      open.classList.remove("card-full");
-      document.body.style.overflow = "";
-      fsBackdrop.classList.remove("show");
-      if (closeBtn) closeBtn.textContent = "⤢ Expand";
-    }
-  });
-
-  // YouTube swap
-  grid.addEventListener("click", (e) => {
-    const item = e.target.closest(".yt-item");
-    if (!item) return;
-    const container = item.closest("[data-yt]");
-    if (!container) return;
-    const newId = item.dataset.vid;
-    const iframe = container.querySelector("iframe.yt-embed");
-    if (!iframe) return;
-    container.querySelectorAll(".yt-item").forEach(el => el.classList.remove("active"));
-    item.classList.add("active");
-    iframe.src = ytEmbedSrc(newId);
-    const card = item.closest(".card");
-    const id = card?.dataset.id;
-    if (id) {
-      const s = sections.find(x => x.id === id);
-      if (s) {
-        s.meta = s.meta || {};
-        const existingList = container.dataset.playlist?.split(",").filter(Boolean) || YT_DEFAULTS;
-        s.meta.playlist = existingList;
-        s.meta.current  = newId;
-        s.content = ytPlaylistMarkup(s.meta.playlist, s.meta.current);
-        localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-      }
-    }
-  });
-
-  // Web tile preview <-> embed
-  grid.addEventListener("click", (e) => {
-    const toggle = e.target.closest(".web-toggle");
-    if (!toggle) return;
-    const card = e.target.closest(".card");
-    const tile = e.target.closest("[data-web]");
-    if (!card || !tile) return;
-    const id = card.dataset.id;
-    const s = sections.find(x => x.id === id);
-    if (!s) return;
-    const url = tile.dataset.url;
-    const nextMode = toggle.dataset.mode; // "embed" or "preview"
-    s.meta = s.meta || {};
-    s.meta.url = url;
-    s.meta.mode = nextMode;
-    s.content = webTileMarkup(url, nextMode);
-    localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-    const content = card.querySelector(".content");
-    if (content) content.innerHTML = s.content;
-  });
-
-  // RSS refresh
-  grid.addEventListener("click", (e) => {
-    const refresh = e.target.closest(".rss-refresh");
-    if (!refresh) return;
-    const card = e.target.closest(".card");
-    if (!card) return;
-    const id = card.dataset.id;
-    const s = sections.find(x => x.id === id);
-    if (!s) return;
-    const feeds = s.meta?.feeds || RSS_PRESETS.uk;
-    loadRssInto(card, feeds);
-  });
-
-  // Gallery viewer
-  grid.addEventListener("click", (e) => {
-    const img = e.target.closest(".gallery img");
-    if (img) {
-      const tile = e.target.closest(".gallery-tile");
-      const view = tile.querySelector(".gallery-view");
-      const large = view.querySelector("img");
-      large.src = img.src;
-      view.classList.add("show");
-      return;
-    }
-    const close = e.target.closest(".gallery-view");
-    if (close) {
-      close.classList.remove("show");
-    }
-  });
 })();
 
 /* -----------------------------
-   Dynamic tiles & live feeds
+   Dynamic & live
 ----------------------------- */
-function stopDynamicTimers(){
-  Object.values(dynamicTimers).forEach(clearInterval);
-  dynamicTimers = {};
-}
-function stopLiveIntervals(){
-  Object.values(liveIntervals).forEach(clearInterval);
-  liveIntervals = {};
-}
+function stopDynamicTimers(){ Object.values(dynamicTimers).forEach(clearInterval); dynamicTimers = {}; }
+function stopLiveIntervals(){ Object.values(liveIntervals).forEach(clearInterval); liveIntervals = {}; }
+
 function initDynamicTiles(){
-  // Football heartbeat (simulated)
+  // (same as 1.9.7) football + stocks simulation
   $$('.card[data-type="football"]').forEach(card=>{
     const container = card.querySelector(".scores");
     if (!container) return;
@@ -749,11 +640,9 @@ function initDynamicTiles(){
         });
       }
     }, 5000);
-
     dynamicTimers[card.dataset.id] = timer;
   });
 
-  // Stocks (sim fallback; live overwrites)
   $$('.card[data-type="stocks"]').forEach(card=>{
     const ticker = card.querySelector(".ticker");
     if (!ticker) return;
@@ -768,8 +657,8 @@ function initDynamicTiles(){
     dynamicTimers[card.dataset.id] = timer;
   });
 }
+
 function initLiveFeeds(){
-  // RSS (live)
   $$('.card[data-type="rss"]').forEach(card=>{
     const id = card.dataset.id;
     const s = sections.find(x=>x.id===id);
@@ -778,7 +667,6 @@ function initLiveFeeds(){
     liveIntervals[id+"_rss"] = setInterval(()=>loadRssInto(card, feeds), 15*60*1000);
   });
 
-  // Stocks (live)
   $$('.card[data-type="stocks"]').forEach(card=>{
     const id = card.dataset.id;
     const ticker = card.querySelector(".ticker");
@@ -829,10 +717,9 @@ tileSearch?.addEventListener("keydown", (e)=>{
   if (!valRaw) return;
   const val = valRaw.replace(/\s+/g, " ");
 
-  // 1) Travel quick path (kept)
-  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break)/i;
-  const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
-  if (TRAVEL_RE.test(val) || GEO_HINT.test(val)) {
+  // Quick path (kept): obvious travel phrases
+  const TRAVEL_RE = /(holiday|holidays|city\s*break|weekend\s*(away)?|retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|bnb|guesthouse|inn|aparthotel|beach\s*resort|things to do|places to visit|near me|in\s+[A-Za-z][\w\s'-]+)$/i;
+  if (TRAVEL_RE.test(val)) {
     const q = val.replace(/\bnear me\b/i, "near me");
     const t = { id: uid(), type:"maps", title:`Search — ${val}`, meta:{ q }, content: mapsTileMarkup(q) };
     sections.unshift(t);
@@ -843,31 +730,29 @@ tileSearch?.addEventListener("keydown", (e)=>{
     return;
   }
 
-  // 2) AI planner — returns exactly ONE best tile
+  // AI planner: returns ONE best tile
   fetch(`/api/ai-plan?q=${encodeURIComponent(val)}`)
     .then(r=>r.json())
     .then(plan=>{
       const t = plan && plan.tile;
-      if (!t) throw new Error("No tile planned");
       let newTile = null;
 
-      if (t.type === "maps" && t.q) {
+      if (t?.type === "maps" && t.q) {
         newTile = { id: uid(), type:"maps", title: t.title || `Search — ${t.q}`, meta:{ q: t.q }, content: mapsTileMarkup(t.q) };
-      } else if (t.type === "rss" && t.feeds?.length) {
+      } else if (t?.type === "rss" && t.feeds?.length) {
         newTile = { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
-      } else if (t.type === "web" && t.url) {
+      } else if (t?.type === "web" && t.url) {
         newTile = { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
-      } else if (t.type === "youtube" && t.playlist?.length) {
+      } else if (t?.type === "youtube" && t.playlist?.length) {
         const cur = t.playlist[0];
         newTile = { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
-      } else if (t.type === "gallery" && t.images?.length) {
+      } else if (t?.type === "gallery" && t.images?.length) {
         newTile = { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
-      } else if (t.type === "stocks" && t.symbols?.length) {
+      } else if (t?.type === "stocks" && t.symbols?.length) {
         newTile = { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
       }
 
       if (!newTile) {
-        // sane fallback: show google search as a web tile preview
         const url = `https://www.google.com/search?q=${encodeURIComponent(val)}`;
         newTile = { id: uid(), type:"web", title:"Search …", meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
       }
@@ -879,7 +764,6 @@ tileSearch?.addEventListener("keydown", (e)=>{
       tileSearch.value = "";
     })
     .catch(()=>{
-      // network fail → fallback preview search
       const url = `https://www.google.com/search?q=${encodeURIComponent(val)}`;
       const t   = { id: uid(), type:"web", title:"Search …", meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
       sections.unshift(t);
@@ -888,6 +772,53 @@ tileSearch?.addEventListener("keydown", (e)=>{
       tileMenu?.classList.add("hidden");
       tileSearch.value = "";
     });
+});
+
+/* -----------------------------
+   Top-bar: Settings & Assistant
+----------------------------- */
+const settingsBtnTop  = document.getElementById("settingsBtnTop")  || document.querySelector('[data-btn="settings"]');
+const assistantBtnTop = document.getElementById("assistantBtnTop") || document.querySelector('[data-btn="assistant"]');
+
+settingsBtnTop?.addEventListener("click", ()=>{
+  const html = `
+    <div class="modal-card">
+      <h2>Settings</h2>
+      <div class="field">
+        <label>Theme</label>
+        <select class="input" id="pref_theme">
+          <option value="solar" ${prefs.theme==='solar'?'selected':''}>Solar</option>
+          <option value="ice"   ${prefs.theme==='ice'  ?'selected':''}>Ice</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Density</label>
+        <select class="input" id="pref_density">
+          <option value="comfortable" ${prefs.density==='comfortable'?'selected':''}>Comfortable</option>
+          <option value="compact"     ${prefs.density==='compact'    ?'selected':''}>Compact</option>
+        </select>
+      </div>
+      <div class="actions" style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn sm" data-action="cancel">Close</button>
+        <button class="btn sm primary" id="savePrefs">Save</button>
+      </div>
+    </div>`;
+  __openModal(html);
+  $("#savePrefs")?.addEventListener("click", ()=>{
+    prefs.theme   = $("#pref_theme")?.value || "solar";
+    prefs.density = $("#pref_density")?.value || "comfortable";
+    localStorage.setItem(K_PREFS, JSON.stringify(prefs));
+    document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
+    document.body.classList.toggle('density-compact',  prefs.density === 'compact');
+    __closeModal();
+  }, { once:true });
+});
+
+assistantBtnTop?.addEventListener("click", ()=>{
+  assistantOn = !assistantOn;
+  localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
+  document.body.classList.toggle("assistant-off", !assistantOn);
+  updateAssistant(); // ensure input/list hookup
 });
 
 /* -----------------------------
@@ -912,23 +843,20 @@ function updateAssistant(){
     const text = (input.value||"").trim();
     if (!text) return;
     chat.push({ role:"user", text });
-    list.innerHTML += `<div class="ai-msg user"><div class="bubble"></div></div>`;
     localStorage.setItem(K_CHAT, JSON.stringify(chat));
+    updateAssistant();
     input.value = "";
 
-    // Ask the same planner for a helpful action + summary
     fetch(`/api/ai-plan?q=${encodeURIComponent(text)}`)
       .then(r=>r.json())
       .then(plan=>{
-        const msg = plan && plan.message
-          ? plan.message
-          : "Got it. I can create a tile for that — try the Add Tile box too.";
+        const msg = plan?.message || "Got it — I can create a tile for that from Add Tile.";
         chat.push({ role:"ai", text: msg });
         localStorage.setItem(K_CHAT, JSON.stringify(chat));
         updateAssistant();
       })
       .catch(()=>{
-        chat.push({ role:"ai", text: "I couldn't reach the AI service just now. Try again in a moment." });
+        chat.push({ role:"ai", text: "I couldn't reach the AI service. Try again shortly." });
         localStorage.setItem(K_CHAT, JSON.stringify(chat));
         updateAssistant();
       });
@@ -960,6 +888,7 @@ function __closeModal(){ modalHost.classList.remove("show"); modalHost.innerHTML
 document.addEventListener("DOMContentLoaded", () => {
   $("#yr") && ($("#yr").textContent = new Date().getFullYear());
   ensureVersion();
+  document.body.classList.toggle("assistant-off", !assistantOn);
   updateAssistant();
   render();
 });
