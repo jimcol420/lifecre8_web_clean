@@ -1,106 +1,106 @@
-/* ============================================================
-   LifeCre8 — api/ai-plan.js  v1.9.8
-   Returns ONE best-fit tile for query q.
-   Response shape: { message, tiles: [{ type, ...meta }] }
-============================================================ */
-export default async function handler(req, res) {
+// api/ai-plan.js
+// LifeCre8 — AI Planner (single-tile)
+// Heuristic, zero-dependency planner that returns ONE best-fit tile for a query.
+// NOTE: Keep this in sync with client addTileFlow() keywords.
+
+export default function handler(req, res) {
   try {
-    const q = ((req.query && req.query.q) || (req.body && req.body.q) || "")
-      .toString()
-      .trim();
-    if (!q) return res.status(200).json({ message: "Empty query", tiles: [] });
+    const q = (req.query.q || req.body?.q || "").toString().trim();
+    if (!q) return res.status(200).json({ tiles: [], message: "Empty query." });
 
-    const lower = q.toLowerCase();
+    const low = q.toLowerCase();
 
-    // 1) TRAVEL (dominates)
-    const travelRe = /(holiday|holidays|city\s*break|weekend\s*(away)?|retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|things to do|places to visit|near me|in\s+[a-z])/i;
-    if (travelRe.test(lower)) {
-      return res.status(200).json({
-        message: "Travel intent — Maps tile",
-        tiles: [{ type: "maps", q, title: `Search — ${q}` }],
+    // Helpers
+    const isUrl = /^https?:\/\//i.test(q);
+    const match = (re) => re.test(low);
+    const tile = (t) => res.status(200).json({ tiles: [t], message: "ok" });
+
+    // 1) Direct URL → Web
+    if (isUrl) {
+      return tile({
+        type: "web",
+        title: new URL(q).hostname || "Web",
+        url: q
       });
     }
 
-    // 2) RECIPES
-    if (/(recipe|cook|bake|cake|dessert|dinner|lunch|breakfast)/i.test(lower)) {
-      const feed = `https://news.google.com/rss/search?q=${encodeURIComponent(q + " recipe")}&hl=en-GB&gl=GB&ceid=GB:en`;
-      return res.status(200).json({
-        message: "Recipe intent — Daily Brief",
-        tiles: [{ type: "rss", feeds: [feed], title: `Recipes — ${q}` }],
+    // 2) Travel intent → Maps
+    const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|holidays)/i;
+    const GEO_HINT  = /\b(near me|in\s+[a-z][\w\s'-]+)$/i;
+    if (match(TRAVEL_RE) || GEO_HINT.test(low)) {
+      return tile({
+        type: "maps",
+        title: `Search — ${q}`,
+        q
       });
     }
 
-    // 3) SHOPPING
-    if (/(buy|for sale|price|best|review|compare|deal)s?/i.test(lower)) {
-      return res.status(200).json({
-        message: "Shopping intent — Search tile",
-        tiles: [{
-          type: "web",
-          url: `https://www.google.com/search?q=${encodeURIComponent(q)}`,
-          title: `Search — ${q}`,
-        }],
-      });
-    }
-
-    // 4) YOUTUBE
-    if (/^youtube /.test(lower) || /watch\?v=|youtu\.be\//.test(lower)) {
-      const idMatch = q.match(/(?:watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/);
-      const vid = idMatch ? idMatch[1] : null;
-      const playlist = vid ? [vid] : ["M7lc1UVf-VE", "5qap5aO4i9A", "jfKfPfyJRdk"];
-      return res.status(200).json({
-        message: "YouTube tile",
-        tiles: [{ type: "youtube", playlist, title: "YouTube" }],
-      });
-    }
-
-    // 5) Explicit "news ..."
-    const mNews = q.match(/^news(?:\s+(.+))?$/i);
+    // 3) News quick command
+    const mNews = low.match(/^news(?:\s+(.+))?$/i);
     if (mNews) {
       const topic = (mNews[1] || "").trim();
       const feeds = topic
         ? [`https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`]
-        : ["https://feeds.bbci.co.uk/news/rss.xml", "https://www.theguardian.com/uk-news/rss"];
-      return res.status(200).json({
-        message: "Daily Brief",
-        tiles: [{ type: "rss", feeds, title: topic ? `Daily Brief — ${topic}` : "Daily Brief" }],
+        : [
+            "https://feeds.bbci.co.uk/news/rss.xml",
+            "https://www.theguardian.com/uk-news/rss",
+          ];
+      return tile({
+        type: "rss",
+        title: topic ? `Daily Brief — ${topic}` : "Daily Brief (UK)",
+        feeds
       });
     }
 
-    // 6) Visual-only intents (gallery)
-    if (/(wallpaper|aesthetic|moodboard|logo\s+ideas?|poster\s+ideas?|reference\s+sheet|concept\s+art)/i.test(lower)) {
-      const base = "https://source.unsplash.com/600x400/?";
-      const images = Array.from({ length: 8 }, (_, i) => `${base}${encodeURIComponent(q)}&sig=${i}`);
-      return res.status(200).json({
-        message: "Gallery tile",
-        tiles: [{ type: "gallery", images, title: `Gallery — ${q}` }],
-      });
+    // 4) YouTube links / command
+    const yt = q.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
+    if (yt) {
+      const id = yt[1];
+      return tile({ type: "youtube", title: "YouTube", playlist: [id] });
+    }
+    if (low.startsWith("youtube ")) {
+      return tile({ type: "youtube", title: "YouTube", playlist: ["M7lc1UVf-VE"] });
     }
 
-    // 7) General topic → Daily Brief
-    if (/\s/.test(lower) && lower.length > 8) {
-      return res.status(200).json({
-        message: "Topic — Daily Brief",
-        tiles: [{
-          type: "rss",
-          feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`],
-          title: `Daily Brief — ${q}`,
-        }],
-      });
-    }
-
-    // 8) Fallback: Web search
-    return res.status(200).json({
-      message: "Fallback — Search tile",
-      tiles: [{
+    // 5) Recipes / how-to → Web search (not news)
+    if (match(/\b(recipe|recipes|how to|guide|tutorial|ingredients)\b/i)) {
+      return tile({
         type: "web",
-        url: `https://www.google.com/search?q=${encodeURIComponent(q)}`,
-        title: `Search — ${q}`,
-      }],
+        title: "Search …",
+        url: `https://www.google.com/search?q=${encodeURIComponent(q)}`
+      });
+    }
+
+    // 6) Shopping / for-sale intent → Web search
+    if (match(/\b(buy|for sale|price|prices|best|cheap|deal|deals)\b/i)) {
+      return tile({
+        type: "web",
+        title: "Search …",
+        url: `https://www.google.com/search?q=${encodeURIComponent(q)}`
+      });
+    }
+
+    // 7) Images / wallpapers → Gallery (Unsplash source URLs; no key needed)
+    if (match(/\b(images?|photos?|pictures?|wallpaper|backgrounds?)\b/i)) {
+      const qSlug = encodeURIComponent(q.replace(/\b(images?|photos?|pictures?)\b/gi, "").trim() || q);
+      const urls = Array.from({ length: 8 }).map((_, i) =>
+        `https://source.unsplash.com/600x400/?${qSlug}&sig=${i+1}`
+      );
+      return tile({ type: "gallery", title: `Gallery — ${q}`, images: urls });
+    }
+
+    // 8) Stocks / markets
+    if (match(/\b(stocks?|markets?)\b/)) {
+      return tile({ type: "stocks", title: "Markets", symbols: ["AAPL","MSFT","BTC-USD"] });
+    }
+
+    // 9) Default fallback: news about the topic (single RSS)
+    return tile({
+      type: "rss",
+      title: `Daily Brief — ${q}`,
+      feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`]
     });
   } catch (e) {
-    return res.status(200).json({
-      message: "Planner error — search tile",
-      tiles: [{ type: "web", url: "https://www.google.com", title: "Search …" }],
-    });
+    return res.status(200).json({ tiles: [], message: "planner error" });
   }
 }
