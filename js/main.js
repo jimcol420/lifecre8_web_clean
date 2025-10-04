@@ -572,3 +572,227 @@ document.addEventListener("DOMContentLoaded", ()=>{
     try { wireAssistant(); } catch {}
   });
 })();
+/* ============================================================
+   LifeCre8 — Safety Footer v2 (buttons + assistant formatter)
+   Paste at the very end of js/main.js. No other edits needed.
+============================================================ */
+(function () {
+  // --- storage keys (redeclare safely) ---------------------
+  const K_ASSIST_ON = "lifecre8.assistantOn";
+  const K_PREFS     = "lifecre8.prefs";
+  const K_SECTIONS  = "lifecre8.sections";
+  const K_VERSION   = "lifecre8.version";
+
+  // --- tiny helpers ----------------------------------------
+  const $  = (q, root=document) => root.querySelector(q);
+  const $$ = (q, root=document) => Array.from(root.querySelectorAll(q));
+  const byText = (re) => $$("button,.btn").find(b => re.test((b.textContent||"").trim()));
+
+  // =========================================================
+  // Assistant panel: wire input + send, pretty print replies
+  // =========================================================
+  function wireAssistant() {
+    if (window.__wiredAssistant) return; window.__wiredAssistant = true;
+
+    // find panel + parts (be generous with selectors)
+    const panel =
+      $("#assistantPanel") || $(".assistant-panel") || $(".ai-assistant") ||
+      $$("aside,section,div").find(el => /AI Assistant/i.test(el?.textContent||""));
+
+    if (!panel) return;
+
+    const input =
+      panel.querySelector('textarea') ||
+      panel.querySelector('input[type="text"]') ||
+      panel.querySelector('input[placeholder^="Ask me anything"]');
+
+    let sendBtn =
+      panel.querySelector('button[type="submit"]') ||
+      panel.querySelector('.ai-send') ||
+      byText(/^(send)$/i);
+
+    // message list (create if missing)
+    let log = panel.querySelector(".ai-log");
+    if (!log) {
+      log = document.createElement("div");
+      log.className = "ai-log";
+      log.style.cssText = "display:grid;gap:10px;padding:6px 0;max-height:calc(100% - 56px);overflow:auto;";
+      panel.insertBefore(log, panel.firstChild);
+    }
+
+    function addMsg(role, html) {
+      const row = document.createElement("div");
+      row.className = `ai-row ${role}`;
+      row.style.cssText = "display:flex;gap:8px;align-items:flex-start;";
+      const badge = document.createElement("div");
+      badge.textContent = role === "user" ? "🟠" : "🔵";
+      const body = document.createElement("div");
+      body.style.cssText = "white-space:pre-wrap;line-height:1.4";
+      body.innerHTML = html;
+      row.appendChild(badge); row.appendChild(body);
+      log.appendChild(row);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function fmt(obj) {
+      // Try common fields first
+      if (typeof obj === "string") return obj;
+      const reply = obj?.reply || obj?.answer || obj?.message || obj?.summary;
+      if (reply) return String(reply);
+
+      // ai-plan style tiles
+      if (Array.isArray(obj?.tiles) && obj.tiles.length) {
+        const items = obj.tiles.map(t => {
+          if (t.type === "rss" && t.topic) return `• News plan for <strong>${t.topic}</strong>`;
+          if (t.type === "maps" && t.q)    return `• Places: <strong>${t.q}</strong>`;
+          if (t.type === "web" && t.url)   return `• Web: <a href="${t.url}" target="_blank" rel="noopener">${t.title || t.url}</a>`;
+          if (t.type === "gallery")        return `• Gallery (${(t.images||[]).length} images)`;
+          if (t.type === "youtube")        return `• YouTube playlist (${(t.playlist||[]).length})`;
+          return `• ${t.type || "tile"}`;
+        }).join("<br>");
+        return items || "I’ve prepared a plan.";
+      }
+
+      // fallback: compact JSON, but not the huge dump
+      try { return `<code>${JSON.stringify(obj, null, 2)}</code>`; }
+      catch { return "I’m not sure how to display that result."; }
+    }
+
+    async function askAI(q) {
+      // Prefer /api/ai-search; fall back gracefully
+      try {
+        const r = await fetch(`/api/ai-search?q=${encodeURIComponent(q)}`);
+        if (!r.ok) throw new Error("ai-search unavailable");
+        return await r.json();
+      } catch {
+        return { reply: `I’d search & summarise results for: “${q}”. (AI endpoint not reachable right now.)` };
+      }
+    }
+
+    async function handleSend() {
+      if (!input) return;
+      const q = (input.value || "").trim();
+      if (!q) return;
+      input.value = "";
+      addMsg("user", q);
+      const data = await askAI(q);
+      addMsg("ai", fmt(data));
+    }
+
+    if (input) {
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+      });
+    }
+    if (sendBtn) {
+      sendBtn.addEventListener("click", (e) => { e.preventDefault(); handleSend(); });
+    }
+  }
+
+  // ================================================
+  // Top bar buttons: AI Assistant toggle + Settings
+  // ================================================
+  function applyAssistantVisibility() {
+    const on = JSON.parse(localStorage.getItem(K_ASSIST_ON) ?? "true");
+    document.body.classList.toggle("no-right", !on);          // old name
+    document.body.classList.toggle("assistant-closed", !on);  // new name
+  }
+
+  function wireTopButtons() {
+    if (window.__wiredTopBtns) return; window.__wiredTopBtns = true;
+
+    // AI Assistant toggle
+    const aiBtn = byText(/^\s*AI\s+Assistant\s*$/i);
+    if (aiBtn) {
+      aiBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        const cur = JSON.parse(localStorage.getItem(K_ASSIST_ON) ?? "true");
+        localStorage.setItem(K_ASSIST_ON, String(!cur));
+        applyAssistantVisibility();
+      });
+    }
+    applyAssistantVisibility();
+
+    // Settings modal (lightweight, independent of app modal)
+    const setBtn = byText(/^\s*Settings\s*$/i);
+    if (setBtn) setBtn.addEventListener("click", openSettingsMini);
+  }
+
+  function openSettingsMini(e) {
+    e?.preventDefault?.();
+    let prefs;
+    try { prefs = JSON.parse(localStorage.getItem(K_PREFS) || "{}"); } catch { prefs = {}; }
+    const theme   = prefs.theme   || "solar";
+    const density = prefs.density || "comfortable";
+
+    const wrap = document.createElement("div");
+    wrap.id = "miniSettings";
+    wrap.style.cssText = `
+      position:fixed;inset:0;z-index:9999;display:grid;place-items:center;
+      background:rgba(0,0,0,0.4)`;
+    wrap.innerHTML = `
+      <div style="min-width:320px;background:#0e1a2a;border:1px solid var(--border);
+                  border-radius:12px;padding:16px;box-shadow:0 10px 40px rgba(0,0,0,.4)">
+        <h2 style="margin:0 0 12px 0;font-size:18px">Settings</h2>
+
+        <div class="field" style="margin:8px 0">
+          <label>Theme</label>
+          <select id="mini_theme" class="input">
+            <option value="solar" ${theme==='solar'?'selected':''}>Solar</option>
+            <option value="ice"   ${theme==='ice'?'selected':''}>Ice</option>
+          </select>
+        </div>
+
+        <div class="field" style="margin:8px 0">
+          <label>Density</label>
+          <select id="mini_density" class="input">
+            <option value="comfortable" ${density==='comfortable'?'selected':''}>Comfortable</option>
+            <option value="compact"     ${density==='compact'?'selected':''}>Compact</option>
+          </select>
+        </div>
+
+        <div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px">
+          <button id="mini_reset"  class="btn">Reset Layout</button>
+          <div style="display:flex;gap:8px">
+            <button id="mini_cancel" class="btn">Cancel</button>
+            <button id="mini_save"   class="btn primary">Save</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(wrap);
+
+    function close(){ wrap.remove(); }
+
+    $("#mini_cancel", wrap).addEventListener("click", close);
+
+    $("#mini_save", wrap).addEventListener("click", () => {
+      const newPrefs = {
+        theme:   $("#mini_theme", wrap).value,
+        density: $("#mini_density", wrap).value
+      };
+      localStorage.setItem(K_PREFS, JSON.stringify(newPrefs));
+      // apply classes immediately
+      document.body.classList.toggle('theme-ice', newPrefs.theme === 'ice');
+      document.body.classList.toggle('density-compact', newPrefs.density === 'compact');
+      if (newPrefs.theme !== 'ice') document.body.classList.remove('theme-ice');
+      if (newPrefs.density !== 'compact') document.body.classList.remove('density-compact');
+      close();
+    });
+
+    $("#mini_reset", wrap).addEventListener("click", () => {
+      if (!confirm("Reset layout and reload?")) return;
+      localStorage.removeItem(K_SECTIONS);
+      localStorage.removeItem(K_VERSION);
+      location.reload();
+    });
+
+    wrap.addEventListener("click", (ev) => { if (ev.target === wrap) close(); });
+  }
+
+  // --- bootstrap (doesn't require touching your init) -----
+  document.addEventListener("DOMContentLoaded", () => {
+    try { wireTopButtons(); } catch {}
+    try { wireAssistant(); }  catch {}
+  });
+})();
