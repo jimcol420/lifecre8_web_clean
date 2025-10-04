@@ -1,10 +1,11 @@
 /* ============================================================
    LifeCre8 — main.js  v1.9.7
-   What’s new (vs 1.9.5/1.9.6):
-   - AI Add-Tile uses /api/ai-plan to return ONE tile per query
-   - Travel intent (holiday/trip/itinerary/attractions/hotel/etc.) -> Maps tile
-   - Assistant panel is re-wired (instant echo placeholder)
-   Everything else unchanged.
+   Built on your stable 1.9.5 baseline.
+   What’s new:
+   - AI Add Tile: calls /api/ai-plan and adds **one** best-fit tile.
+   - Travel intent → Maps tile (kept).
+   - AI Assistant box works again (posts to /api/ai-plan and shows reply).
+   - No changes to layout/grid, RSS, YouTube, Stocks, Gallery.
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -37,30 +38,30 @@ const RSS_PRESETS = {
 };
 
 const STOCK_PRESETS = {
-  "Tech Giants": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA"],
-  Crypto: ["BTC-USD", "ETH-USD", "SOL-USD"],
-  "US Indexes": ["^GSPC", "^DJI", "^IXIC"],
+  "Tech Giants": ["AAPL","MSFT","GOOGL","AMZN","NVDA"],
+  "Crypto": ["BTC-USD","ETH-USD","SOL-USD"],
+  "US Indexes": ["^GSPC","^DJI","^IXIC"],
 };
 
 /* ===== State ===== */
 let sections    = JSON.parse(localStorage.getItem(K_SECTIONS)  || "[]");
 let assistantOn = localStorage.getItem(K_ASSIST_ON) === null ? true : JSON.parse(localStorage.getItem(K_ASSIST_ON));
 let chat        = JSON.parse(localStorage.getItem(K_CHAT)      || "[]");
-if (!chat.length) chat = [{ role: "ai", text: "Hi! I'm your AI Assistant. Ask me anything." }];
+if (!chat.length) chat = [{ role:'ai', text:"Hi! I'm your AI Assistant. Ask me anything." }];
 
 let prefs = JSON.parse(localStorage.getItem(K_PREFS) || "{}");
 if (!prefs.theme)   prefs.theme   = "solar";
 if (!prefs.density) prefs.density = "comfortable";
-document.body.classList.toggle("theme-ice",       prefs.theme   === "ice");
-document.body.classList.toggle("density-compact", prefs.density === "compact");
+document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
+document.body.classList.toggle('density-compact',  prefs.density === 'compact');
 
 let dynamicTimers = {};
 let liveIntervals = {};
 
 /* ===== Utils ===== */
-const $  = (q) => document.querySelector(q);
-const $$ = (q) => Array.from(document.querySelectorAll(q));
-const uid   = () => Math.random().toString(36).slice(2);
+const $  = q => document.querySelector(q);
+const $$ = q => Array.from(document.querySelectorAll(q));
+const uid = () => Math.random().toString(36).slice(2);
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
 
@@ -74,12 +75,10 @@ if (!fsBackdrop) {
   document.body.appendChild(fsBackdrop);
 }
 
-/* ============================================================
-   Tile renderers
-============================================================ */
-
-/* YouTube */
-const YT_DEFAULTS = ["M7lc1UVf-VE", "5qap5aO4i9A", "DWcJFNfaw9c", "jfKfPfyJRdk"];
+/* -----------------------------
+   YouTube helpers
+----------------------------- */
+const YT_DEFAULTS = [ "M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk" ];
 const ytEmbedSrc = (id) => `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
 function ytPlaylistMarkup(playlist, currentId) {
   const ids = (playlist && playlist.length) ? playlist : YT_DEFAULTS;
@@ -107,7 +106,9 @@ function ytPlaylistMarkup(playlist, currentId) {
   `;
 }
 
-/* Web (generic preview/embed) */
+/* -----------------------------
+   Web tile (generic)
+----------------------------- */
 function webTileMarkup(url, mode = "preview") {
   const host = hostOf(url);
   const favicon = host ? `https://www.google.com/s2/favicons?domain=${host}&sz=32` : "";
@@ -143,12 +144,14 @@ function webTileMarkup(url, mode = "preview") {
   `;
 }
 
-/* Maps (travel) */
+/* -----------------------------
+   Maps tile (travel intent)
+----------------------------- */
 function mapsTileMarkup(query){
-  const embed = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
-  const open  = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
+  const embed   = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
+  const open    = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
   const booking = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(query)}`;
-  const trip   = `https://www.tripadvisor.com/Search?q=${encodeURIComponent(query)}`;
+  const trip    = `https://www.tripadvisor.com/Search?q=${encodeURIComponent(query)}`;
   return `
     <div data-maps>
       <div class="web-actions" style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap">
@@ -161,7 +164,9 @@ function mapsTileMarkup(query){
   `;
 }
 
-/* Spotify */
+/* -----------------------------
+   Spotify tile
+----------------------------- */
 function spotifyMarkup(spotifyUrl) {
   const src = spotifyUrl.replace("open.spotify.com/", "open.spotify.com/embed/");
   return `
@@ -173,7 +178,9 @@ function spotifyMarkup(spotifyUrl) {
   `;
 }
 
-/* RSS (enriched list) */
+/* -----------------------------
+   RSS tile
+----------------------------- */
 function rssListMarkup(items) {
   const list = (items || []).map(i => `
     <div class="rss-item" style="display:flex; gap:10px; align-items:flex-start;">
@@ -181,44 +188,55 @@ function rssListMarkup(items) {
                  : `<div style="width:56px;height:56px;border-radius:8px;border:1px solid var(--border);background:#0a1522"></div>`}
       <div>
         <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
-        <div class="muted">${i.source || ""} ${i.time ? `— ${i.time}` : ""}</div>
+        <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
       </div>
     </div>
   `).join("");
   return `
     <div class="rss" data-rss>
-      <div class="rss-controls"><button class="btn sm rss-refresh">Refresh</button></div>
+      <div class="rss-controls">
+        <button class="btn sm rss-refresh">Refresh</button>
+      </div>
       ${list}
     </div>
   `;
 }
-const rssLoadingMarkup = () => `
-  <div class="rss" data-rss>
-    <div class="rss-controls"><button class="btn sm rss-refresh">Refresh</button></div>
-    <div class="muted">Loading…</div>
-  </div>`;
-const rssErrorMarkup = () => `
-  <div class="rss" data-rss>
-    <div class="rss-controls"><button class="btn sm rss-refresh">Refresh</button></div>
-    <div class="muted">Couldn’t load news right now. Try Refresh in a moment.</div>
-  </div>`;
-function loadRssInto(card, feeds, attempt = 1) {
+function rssLoadingMarkup() {
+  return `
+    <div class="rss" data-rss>
+      <div class="rss-controls"><button class="btn sm rss-refresh">Refresh</button></div>
+      <div class="muted">Loading…</div>
+    </div>
+  `;
+}
+function rssErrorMarkup() {
+  return `
+    <div class="rss" data-rss>
+      <div class="rss-controls"><button class="btn sm rss-refresh">Refresh</button></div>
+      <div class="muted">Couldn’t load news right now. Try Refresh in a moment.</div>
+    </div>
+  `;
+}
+function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
+
   const url = `/api/rss?full=1&url=${encodeURIComponent(feeds[0])}`;
   fetch(url)
-    .then(r => r.json())
-    .then(data => {
-      const items = (data.items || []).slice(0, 10);
+    .then(r=>r.json())
+    .then(data=>{
+      const items = (data.items||[]).slice(0,10);
       content.innerHTML = rssListMarkup(items);
     })
-    .catch(() => {
-      if (attempt < 2) setTimeout(() => loadRssInto(card, feeds, attempt + 1), 1000);
+    .catch(()=>{
+      if (attempt < 2) setTimeout(()=>loadRssInto(card, feeds, attempt+1), 1000);
       else content.innerHTML = rssErrorMarkup();
     });
 }
 
-/* Gallery */
+/* -----------------------------
+   Gallery
+----------------------------- */
 function galleryMarkup(urls) {
   const imgs = (urls || []).map(u => `<img src="${u}" alt="">`).join("");
   return `
@@ -229,7 +247,9 @@ function galleryMarkup(urls) {
   `;
 }
 
-/* Markets */
+/* -----------------------------
+   Markets
+----------------------------- */
 function tickerMarkup(symbols) {
   const rows = symbols.map(sym => `
     <div class="trow" data-sym="${sym}">
@@ -240,14 +260,14 @@ function tickerMarkup(symbols) {
   return `<div class="ticker" data-symbols="${symbols.join(",")}">${rows}</div>`;
 }
 function loadQuotesInto(card, symbols) {
-  const url = `/api/quote?symbols=${encodeURIComponent(symbols.join(","))}`;
+  const url = `/api/quote?symbols=${encodeURIComponent(symbols.join(','))}`;
   fetch(url)
-    .then(r => r.json())
-    .then(data => {
+    .then(r=>r.json())
+    .then(data=>{
       const map = {};
-      (data.quotes || []).forEach(q => { map[q.symbol.toUpperCase()] = q; });
+      (data.quotes||[]).forEach(q=>{ map[q.symbol.toUpperCase()] = q; });
       const rows = card.querySelectorAll(".trow");
-      rows.forEach(row => {
+      rows.forEach(row=>{
         const sym = row.dataset.sym.toUpperCase();
         const q = map[sym];
         if (!q) return;
@@ -256,15 +276,15 @@ function loadQuotesInto(card, symbols) {
         const price = q.price;
         const delta = q.change;
         const pct   = q.changePercent;
-        priceEl.textContent = (price != null) ? price.toFixed(2) : "—";
-        chgEl.textContent   = (delta != null && pct != null)
-          ? `${delta >= 0 ? "+" : ""}${delta.toFixed(2)}  (${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%)`
+        priceEl.textContent = (price!=null) ? price.toFixed(2) : "—";
+        chgEl.textContent   = (delta!=null && pct!=null)
+          ? `${delta>=0?"+":""}${delta.toFixed(2)}  (${pct>=0?"+":""}${pct.toFixed(2)}%)`
           : "—";
         row.classList.toggle("up",   delta >= 0);
         row.classList.toggle("down", delta <  0);
       });
     })
-    .catch(() => {
+    .catch(()=>{
       const content = card.querySelector(".content");
       if (content && !content.querySelector(".ticker")) {
         content.innerHTML = `<div class="muted">Live prices unavailable right now.</div>`;
@@ -272,12 +292,14 @@ function loadQuotesInto(card, symbols) {
     });
 }
 
-/* Football (sim fallback) */
+/* -----------------------------
+   Football (simulated fallback)
+----------------------------- */
 function footballMarkupSeed() {
   const matches = [
-    { home:"Arsenal", away:"Chelsea", hs:0, as:0, min:0, status:"KO 20:00", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/gb-eng.png", awayBadge:"https://flagcdn.com/w20/gb-eng.png" },
-    { home:"Barcelona", away:"Real Madrid", hs:0, as:0, min:0, status:"KO 20:15", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/es.png", awayBadge:"https://flagcdn.com/w20/es.png" },
-    { home:"Bayern", away:"Dortmund", hs:0, as:0, min:0, status:"KO 20:30", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/de.png", awayBadge:"https://flagcdn.com/w20/de.png" },
+    { home:"Arsenal",   away:"Chelsea",     hs:0, as:0, min:0, status:"KO 20:00", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/gb-eng.png", awayBadge:"https://flagcdn.com/w20/gb-eng.png" },
+    { home:"Barcelona", away:"Real Madrid", hs:0, as:0, min:0, status:"KO 20:15", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/es.png",     awayBadge:"https://flagcdn.com/w20/es.png" },
+    { home:"Bayern",    away:"Dortmund",    hs:0, as:0, min:0, status:"KO 20:30", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/de.png",     awayBadge:"https://flagcdn.com/w20/de.png" },
   ];
   const rows = matches.map((m,i)=>`
     <div class="match" data-idx="${i}">
@@ -290,9 +312,9 @@ function footballMarkupSeed() {
   return `<div class="scores" data-matches="${encodeURIComponent(JSON.stringify(matches))}">${rows}</div>`;
 }
 
-/* ============================================================
-   Defaults & storage
-============================================================ */
+/* -----------------------------
+   Defaults
+----------------------------- */
 function gallerySeed() {
   return [
     "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?q=80&w=600&auto=format&fit=crop",
@@ -306,13 +328,17 @@ function gallerySeed() {
 function defaultSections() {
   return [
     { id: uid(), type:"rss",      title:"Daily Brief", meta:{ feeds: RSS_PRESETS.uk }, content: rssLoadingMarkup() },
-    { id: uid(), type:"web",      title:"BBC News",    meta:{ url:"https://www.bbc.com", mode:"preview" }, content: webTileMarkup("https://www.bbc.com","preview") },
+    { id: uid(), type:"web",      title:"BBC News",    meta:{url:"https://www.bbc.com", mode:"preview"}, content: webTileMarkup("https://www.bbc.com","preview") },
     { id: uid(), type:"youtube",  title:"YouTube",     meta:{ playlist:[...YT_DEFAULTS], current:"M7lc1UVf-VE" }, content: ytPlaylistMarkup(YT_DEFAULTS, "M7lc1UVf-VE") },
     { id: uid(), type:"stocks",   title:"Markets",     meta:{ symbols:["AAPL","MSFT","BTC-USD"] }, content: tickerMarkup(["AAPL","MSFT","BTC-USD"]) },
     { id: uid(), type:"football", title:"Football",    meta:{}, content: footballMarkupSeed() },
     { id: uid(), type:"gallery",  title:"Gallery",     meta:{ urls: gallerySeed() }, content: galleryMarkup(gallerySeed()) }
   ];
 }
+
+/* -----------------------------
+   Storage versioning / seed
+----------------------------- */
 function ensureVersion() {
   const current = parseInt(localStorage.getItem(K_VERSION) || "0", 10);
   if (!sections.length) {
@@ -324,9 +350,9 @@ function ensureVersion() {
   }
 }
 
-/* ============================================================
+/* -----------------------------
    Rendering
-============================================================ */
+----------------------------- */
 function tileContentFor(section) {
   switch (section.type) {
     case "youtube": {
@@ -347,14 +373,16 @@ function tileContentFor(section) {
       const url = section.meta?.url || "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
       return spotifyMarkup(url);
     }
-    case "rss":   return section.content || rssLoadingMarkup();
+    case "rss": {
+      return section.content || rssLoadingMarkup();
+    }
     case "gallery": {
       const urls = section.meta?.urls || [];
       return galleryMarkup(urls);
     }
-    case "stocks":   return section.content;
+    case "stocks": return section.content;
     case "football": return section.content;
-    default:         return section.content || "Empty tile";
+    default: return section.content || "Empty tile";
   }
 }
 function cardHeaderActions(id){
@@ -373,8 +401,8 @@ function render() {
   const grid = $("#grid");
   grid.innerHTML = "";
 
-  const others = sections.filter(s => s.type !== "email");
-  const emails = sections.filter(s => s.type === "email");
+  const others = sections.filter(s=>s.type!=="email");
+  const emails = sections.filter(s=>s.type==="email");
 
   [...others, ...emails].forEach(s => {
     const card = document.createElement("div");
@@ -395,9 +423,9 @@ function render() {
   initLiveFeeds();
 }
 
-/* ============================================================
-   Delegated handlers (grid)
-============================================================ */
+/* -----------------------------
+   Delegated handlers
+----------------------------- */
 (function attachDelegatesOnce(){
   const grid = $("#grid");
 
@@ -437,7 +465,7 @@ function render() {
     render();
   });
 
-  // Settings
+  // Settings (per tile)
   grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".settingsBtn");
     if (!btn) return;
@@ -557,18 +585,18 @@ function render() {
         s.content = mapsTileMarkup(q);
       } else if (s.type === "youtube") {
         const playlist = ($("#set_playlist")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
-        const list = playlist.length ? playlist : (s.meta?.playlist || YT_DEFAULTS);
+        const list = playlist.length? playlist : (s.meta?.playlist || YT_DEFAULTS);
         const current = list[0];
         s.meta = {...(s.meta||{}), playlist:list, current};
         s.content = ytPlaylistMarkup(list, current);
       } else if (s.type === "stocks") {
         const symbols = ($("#set_symbols")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
-        const syms = symbols.length ? symbols : (s.meta?.symbols || ["AAPL","MSFT","BTC-USD"]);
+        const syms = symbols.length? symbols : (s.meta?.symbols || ["AAPL","MSFT","BTC-USD"]);
         s.meta = {...(s.meta||{}), symbols: syms};
         s.content = tickerMarkup(syms);
       } else if (s.type === "rss") {
         const feeds = ($("#set_feeds")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
-        const list = feeds.length ? feeds : (s.meta?.feeds || RSS_PRESETS.uk);
+        const list = feeds.length? feeds : (s.meta?.feeds || RSS_PRESETS.uk);
         s.meta = {...(s.meta||{}), feeds: list};
         s.content = rssLoadingMarkup();
       }
@@ -640,7 +668,7 @@ function render() {
     const s = sections.find(x => x.id === id);
     if (!s) return;
     const url = tile.dataset.url;
-    const nextMode = toggle.dataset.mode;
+    const nextMode = toggle.dataset.mode; // "embed" or "preview"
     s.meta = s.meta || {};
     s.meta.url = url;
     s.meta.mode = nextMode;
@@ -675,27 +703,36 @@ function render() {
       return;
     }
     const close = e.target.closest(".gallery-view");
-    if (close) close.classList.remove("show");
+    if (close) {
+      close.classList.remove("show");
+    }
   });
 })();
 
-/* ============================================================
+/* -----------------------------
    Dynamic tiles & live feeds
-============================================================ */
-function stopDynamicTimers(){ Object.values(dynamicTimers).forEach(clearInterval); dynamicTimers = {}; }
-function stopLiveIntervals(){ Object.values(liveIntervals).forEach(clearInterval); liveIntervals = {}; }
-
+----------------------------- */
+function stopDynamicTimers(){
+  Object.values(dynamicTimers).forEach(clearInterval);
+  dynamicTimers = {};
+}
+function stopLiveIntervals(){
+  Object.values(liveIntervals).forEach(clearInterval);
+  liveIntervals = {};
+}
 function initDynamicTiles(){
   // Football heartbeat (simulated)
   $$('.card[data-type="football"]').forEach(card=>{
     const container = card.querySelector(".scores");
     if (!container) return;
+
     let matches;
     try { matches = JSON.parse(decodeURIComponent(container.dataset.matches || "[]")); }
-    catch { matches = [{ home:"Team A", away:"Team B", hs:0, as:0, min:0, status:"KO 20:00", started:false, finished:false }];}
+    catch { matches = [{ home:"Team A", away:"Team B", hs:0, as:0, min:0, status:"KO 20:00", started:false, finished:false }]; }
+
     const timer = setInterval(()=>{
       let changed = false;
-      matches.forEach((m)=>{
+      matches.forEach((m, i)=>{
         if (!m.started && Math.random() < 0.3) { m.started = true; m.min = 1; m.status = "1'"; changed = true; }
         else if (m.started && !m.finished) {
           if (Math.random() < 0.7) { m.min = clamp(m.min + 1, 1, 95); m.status = m.min >= 90 ? `90'+` : `${m.min}'`; changed = true; }
@@ -712,6 +749,7 @@ function initDynamicTiles(){
         });
       }
     }, 5000);
+
     dynamicTimers[card.dataset.id] = timer;
   });
 
@@ -730,7 +768,6 @@ function initDynamicTiles(){
     dynamicTimers[card.dataset.id] = timer;
   });
 }
-
 function initLiveFeeds(){
   // RSS (live)
   $$('.card[data-type="rss"]').forEach(card=>{
@@ -773,9 +810,9 @@ function renderTicker(card, prices, prev){
   });
 }
 
-/* ============================================================
-   Add Tile — AI first (single tile)
-============================================================ */
+/* -----------------------------
+   Add Tile (AI-first)
+----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
 const tileSearch = $("#tileSearch");
@@ -787,56 +824,120 @@ addBtn?.addEventListener("click", () => {
 
 tileSearch?.addEventListener("keydown", (e)=>{
   if (e.key !== "Enter") { if (e.key === "Escape") tileMenu?.classList.add("hidden"); return; }
-  const val = (tileSearch.value || "").trim();
-  if (!val) return;
-  addTileFromQuery(val);
-  tileMenu?.classList.add("hidden");
-  tileSearch.value = "";
-});
 
-async function addTileFromQuery(q){
-  // 1) Ask planner for a single recommended tile
-  let plan;
-  try {
-    const r = await fetch(`/api/ai-plan?q=${encodeURIComponent(q)}`);
-    plan = await r.json();
-  } catch { plan = null; }
+  const valRaw = tileSearch.value.trim();
+  if (!valRaw) return;
+  const val = valRaw.replace(/\s+/g, " ");
 
-  // 2) Materialize ONE tile
-  let newTile = null;
-  const t = plan?.tile || null;
-
-  if (t?.type === "maps") {
-    newTile = { id: uid(), type:"maps", title:t.title || `Search — ${t.q||q}`, meta:{ q: t.q || q }, content: mapsTileMarkup(t.q||q) };
-  } else if (t?.type === "rss" && (t.feeds?.length)) {
-    newTile = { id: uid(), type:"rss", title:t.title || `Daily Brief — ${q}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
-  } else if (t?.type === "youtube") {
-    const playlist = t.playlist?.length ? t.playlist : [...YT_DEFAULTS];
-    const current = playlist[0];
-    newTile = { id: uid(), type:"youtube", title:t.title || "YouTube", meta:{ playlist, current }, content: ytPlaylistMarkup(playlist, current) };
-  } else if (t?.type === "stocks" && (t.symbols?.length)) {
-    newTile = { id: uid(), type:"stocks", title:t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
-  } else if (t?.type === "gallery" && (t.images?.length)) {
-    newTile = { id: uid(), type:"gallery", title:t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
-  } else if (t?.type === "web" && t.url) {
-    newTile = { id: uid(), type:"web", title:t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url,"preview") };
-  } else if (t?.type === "websearch" || !t) {
-    // fallback: Google search preview
-    const url = `https://www.google.com/search?q=${encodeURIComponent(q)}`;
-    newTile = { id: uid(), type:"web", title:"Search …", meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
-  }
-
-  // 3) Prepend it safely
-  if (newTile) {
-    sections.unshift(newTile);
+  // 1) Travel quick path (kept)
+  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break)/i;
+  const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
+  if (TRAVEL_RE.test(val) || GEO_HINT.test(val)) {
+    const q = val.replace(/\bnear me\b/i, "near me");
+    const t = { id: uid(), type:"maps", title:`Search — ${val}`, meta:{ q }, content: mapsTileMarkup(q) };
+    sections.unshift(t);
     localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
     render();
+    tileMenu?.classList.add("hidden");
+    tileSearch.value = "";
+    return;
   }
+
+  // 2) AI planner — returns exactly ONE best tile
+  fetch(`/api/ai-plan?q=${encodeURIComponent(val)}`)
+    .then(r=>r.json())
+    .then(plan=>{
+      const t = plan && plan.tile;
+      if (!t) throw new Error("No tile planned");
+      let newTile = null;
+
+      if (t.type === "maps" && t.q) {
+        newTile = { id: uid(), type:"maps", title: t.title || `Search — ${t.q}`, meta:{ q: t.q }, content: mapsTileMarkup(t.q) };
+      } else if (t.type === "rss" && t.feeds?.length) {
+        newTile = { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
+      } else if (t.type === "web" && t.url) {
+        newTile = { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
+      } else if (t.type === "youtube" && t.playlist?.length) {
+        const cur = t.playlist[0];
+        newTile = { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
+      } else if (t.type === "gallery" && t.images?.length) {
+        newTile = { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
+      } else if (t.type === "stocks" && t.symbols?.length) {
+        newTile = { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
+      }
+
+      if (!newTile) {
+        // sane fallback: show google search as a web tile preview
+        const url = `https://www.google.com/search?q=${encodeURIComponent(val)}`;
+        newTile = { id: uid(), type:"web", title:"Search …", meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+      }
+
+      sections.unshift(newTile);
+      localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+      render();
+      tileMenu?.classList.add("hidden");
+      tileSearch.value = "";
+    })
+    .catch(()=>{
+      // network fail → fallback preview search
+      const url = `https://www.google.com/search?q=${encodeURIComponent(val)}`;
+      const t   = { id: uid(), type:"web", title:"Search …", meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+      sections.unshift(t);
+      localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+      render();
+      tileMenu?.classList.add("hidden");
+      tileSearch.value = "";
+    });
+});
+
+/* -----------------------------
+   AI Assistant (simple, alive)
+----------------------------- */
+function updateAssistant(){
+  const pane = document.getElementById("assistantPane");
+  if (!pane) return;
+  const list = pane.querySelector(".ai-list");
+  const form = pane.querySelector("form");
+  const input = pane.querySelector("input");
+
+  // render chat
+  list.innerHTML = chat.map(m => `
+    <div class="ai-msg ${m.role}">
+      <div class="bubble">${m.text}</div>
+    </div>
+  `).join("");
+
+  form.onsubmit = (e)=>{
+    e.preventDefault();
+    const text = (input.value||"").trim();
+    if (!text) return;
+    chat.push({ role:"user", text });
+    list.innerHTML += `<div class="ai-msg user"><div class="bubble"></div></div>`;
+    localStorage.setItem(K_CHAT, JSON.stringify(chat));
+    input.value = "";
+
+    // Ask the same planner for a helpful action + summary
+    fetch(`/api/ai-plan?q=${encodeURIComponent(text)}`)
+      .then(r=>r.json())
+      .then(plan=>{
+        const msg = plan && plan.message
+          ? plan.message
+          : "Got it. I can create a tile for that — try the Add Tile box too.";
+        chat.push({ role:"ai", text: msg });
+        localStorage.setItem(K_CHAT, JSON.stringify(chat));
+        updateAssistant();
+      })
+      .catch(()=>{
+        chat.push({ role:"ai", text: "I couldn't reach the AI service just now. Try again in a moment." });
+        localStorage.setItem(K_CHAT, JSON.stringify(chat));
+        updateAssistant();
+      });
+  };
 }
 
-/* ============================================================
-   Modals (simple)
-============================================================ */
+/* -----------------------------
+   Modal helpers
+----------------------------- */
 let modalHost = document.getElementById("modalHost");
 if (!modalHost) {
   modalHost = document.createElement("div");
@@ -849,63 +950,13 @@ function __openModal(html){
     <div class="modal">${html}</div>
   `;
   modalHost.classList.add("show");
-  modalHost.addEventListener("click", modalCloseHandler, { once:true });
-}
-function modalCloseHandler(e){
-  if (e.target.classList.contains("modal-backdrop")) __closeModal();
+  modalHost.querySelector(".modal-backdrop")?.addEventListener("click", __closeModal);
 }
 function __closeModal(){ modalHost.classList.remove("show"); modalHost.innerHTML = ""; }
 
-/* ============================================================
-   AI Assistant — UI wiring (echo placeholder)
-============================================================ */
-function updateAssistant() {
-  const panel = document.getElementById("aiPanel");
-  const input = document.getElementById("aiInput");
-  const send  = document.getElementById("aiSend");
-  if (!panel || !input || !send) return;
-
-  const list = panel.querySelector(".ai-messages");
-  const renderChat = () => {
-    if (!list) return;
-    list.innerHTML = (chat || []).map(m =>
-      `<div class="ai-msg ${m.role}"><div class="bubble">${m.text}</div></div>`
-    ).join("");
-    list.scrollTop = list.scrollHeight;
-  };
-
-  const post = async (text) => {
-    chat.push({ role: "user", text });
-    chat.push({ role: "ai", text: "Got it 👍 (placeholder response)." });
-    localStorage.setItem(K_CHAT, JSON.stringify(chat));
-    renderChat();
-
-    // Hook to real endpoint here if desired:
-    // try {
-    //   const r = await fetch("/api/ai-search?q=" + encodeURIComponent(text));
-    //   const data = await r.json();
-    //   chat.push({ role:"ai", text: data.reply || "…" });
-    //   localStorage.setItem(K_CHAT, JSON.stringify(chat));
-    //   renderChat();
-    // } catch {}
-  };
-
-  const sendNow = () => {
-    const v = input.value.trim();
-    if (!v) return;
-    input.value = "";
-    post(v);
-  };
-
-  send.onclick = sendNow;
-  input.onkeydown = (e) => { if (e.key === "Enter") sendNow(); };
-
-  renderChat();
-}
-
-/* ============================================================
+/* -----------------------------
    Init
-============================================================ */
+----------------------------- */
 document.addEventListener("DOMContentLoaded", () => {
   $("#yr") && ($("#yr").textContent = new Date().getFullYear());
   ensureVersion();
