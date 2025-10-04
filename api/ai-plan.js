@@ -1,106 +1,84 @@
-// api/ai-plan.js
-// LifeCre8 — AI Planner (single-tile)
-// Heuristic, zero-dependency planner that returns ONE best-fit tile for a query.
-// NOTE: Keep this in sync with client addTileFlow() keywords.
+// Planner endpoint the Add-Tile flow calls to decide ONE tile to create.
+// GET /api/ai-plan?q=your+query
+// Responds: { tile: { type, ... } }  (single-tile only)
 
-export default function handler(req, res) {
+function hostOf(url) {
+  try { return new URL(url).hostname; } catch { return ""; }
+}
+
+export default async function handler(req, res) {
   try {
-    const q = (req.query.q || req.body?.q || "").toString().trim();
-    if (!q) return res.status(200).json({ tiles: [], message: "Empty query." });
+    // Basic CORS (adjust as needed)
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-    const low = q.toLowerCase();
+    if (req.method === "OPTIONS") return res.status(200).end();
+    if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
-    // Helpers
-    const isUrl = /^https?:\/\//i.test(q);
-    const match = (re) => re.test(low);
-    const tile = (t) => res.status(200).json({ tiles: [t], message: "ok" });
+    const q = (req.query.q || "").toString().trim();
+    if (!q) return res.status(200).json({ tile: fallbackNews("Top stories") });
 
-    // 1) Direct URL → Web
-    if (isUrl) {
-      return tile({
-        type: "web",
-        title: new URL(q).hostname || "Web",
-        url: q
+    // --- Intent heuristics (keep it simple & safe) ---
+
+    // 1) Travel → Maps
+    const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|getaway|staycation|weekend)/i;
+    const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
+    if (TRAVEL_RE.test(q) || GEO_HINT.test(q)) {
+      return res.status(200).json({
+        tile: { type: "maps", q, title: `Search — ${q}` }
       });
     }
 
-    // 2) Travel intent → Maps
-    const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|holidays)/i;
-    const GEO_HINT  = /\b(near me|in\s+[a-z][\w\s'-]+)$/i;
-    if (match(TRAVEL_RE) || GEO_HINT.test(low)) {
-      return tile({
-        type: "maps",
-        title: `Search — ${q}`,
-        q
+    // 2) Cars for sale → Web tile to vertical
+    if (/\bcars?\s+for\s+sale\b/i.test(q)) {
+      const encoded = encodeURIComponent(q);
+      // Try UK-focused verticals first; the client shows Preview w/ "Open" anyway
+      const url = `https://www.autotrader.co.uk/car-search?postcode=&keywords=${encoded}`;
+      return res.status(200).json({
+        tile: { type: "web", url, title: "AutoTrader — search" }
       });
     }
 
-    // 3) News quick command
-    const mNews = low.match(/^news(?:\s+(.+))?$/i);
-    if (mNews) {
-      const topic = (mNews[1] || "").trim();
-      const feeds = topic
-        ? [`https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`]
-        : [
-            "https://feeds.bbci.co.uk/news/rss.xml",
-            "https://www.theguardian.com/uk-news/rss",
-          ];
-      return tile({
-        type: "rss",
-        title: topic ? `Daily Brief — ${topic}` : "Daily Brief (UK)",
-        feeds
+    // 3) Recipes → Web tile to recipe vertical
+    if (/recipe|recipes|bake|cook|how to make/i.test(q)) {
+      const url = `https://www.google.com/search?q=${encodeURIComponent(q + " recipe")}`;
+      return res.status(200).json({
+        tile: { type: "web", url, title: "Recipe search" }
       });
     }
 
-    // 4) YouTube links / command
-    const yt = q.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
-    if (yt) {
-      const id = yt[1];
-      return tile({ type: "youtube", title: "YouTube", playlist: [id] });
-    }
-    if (low.startsWith("youtube ")) {
-      return tile({ type: "youtube", title: "YouTube", playlist: ["M7lc1UVf-VE"] });
-    }
-
-    // 5) Recipes / how-to → Web search (not news)
-    if (match(/\b(recipe|recipes|how to|guide|tutorial|ingredients)\b/i)) {
-      return tile({
-        type: "web",
-        title: "Search …",
-        url: `https://www.google.com/search?q=${encodeURIComponent(q)}`
+    // 4) YouTube
+    if (/^youtube\s+/i.test(q)) {
+      // Let the client default playlist if none—still specify a starter list:
+      return res.status(200).json({
+        tile: { type: "youtube", playlist: ["M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk"], title: "YouTube" }
       });
     }
 
-    // 6) Shopping / for-sale intent → Web search
-    if (match(/\b(buy|for sale|price|prices|best|cheap|deal|deals)\b/i)) {
-      return tile({
-        type: "web",
-        title: "Search …",
-        url: `https://www.google.com/search?q=${encodeURIComponent(q)}`
+    // 5) Stocks/Markets
+    if (/stocks?|markets?|ftse|nasdaq|s&p|dow/i.test(q)) {
+      return res.status(200).json({
+        tile: { type: "stocks", symbols: ["AAPL","MSFT","BTC-USD"], title: "Markets" }
       });
     }
 
-    // 7) Images / wallpapers → Gallery (Unsplash source URLs; no key needed)
-    if (match(/\b(images?|photos?|pictures?|wallpaper|backgrounds?)\b/i)) {
-      const qSlug = encodeURIComponent(q.replace(/\b(images?|photos?|pictures?)\b/gi, "").trim() || q);
-      const urls = Array.from({ length: 8 }).map((_, i) =>
-        `https://source.unsplash.com/600x400/?${qSlug}&sig=${i+1}`
-      );
-      return tile({ type: "gallery", title: `Gallery — ${q}`, images: urls });
-    }
+    // 6) Generic topic → one RSS Daily Brief using Google News
+    return res.status(200).json({ tile: topicNews(q) });
 
-    // 8) Stocks / markets
-    if (match(/\b(stocks?|markets?)\b/)) {
-      return tile({ type: "stocks", title: "Markets", symbols: ["AAPL","MSFT","BTC-USD"] });
-    }
-
-    // 9) Default fallback: news about the topic (single RSS)
-    return tile({
-      type: "rss",
-      title: `Daily Brief — ${q}`,
-      feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`]
-    });
-  } catch (e) {
-    return res.status(200).json({ tiles: [], message: "planner error" });
+  } catch (err) {
+    console.error("ai-plan error:", err);
+    // Fail-safe: fall back to a generic news tile
+    return res.status(200).json({ tile: fallbackNews("Top stories") });
   }
+}
+
+// --- helpers ---
+function topicNews(topic) {
+  const feed = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
+  return { type: "rss", title: `Daily Brief — ${topic}`, feeds: [feed] };
+}
+function fallbackNews(title) {
+  const feed = "https://feeds.bbci.co.uk/news/rss.xml";
+  return { type: "rss", title, feeds: [feed] };
 }

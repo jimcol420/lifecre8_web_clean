@@ -1,12 +1,11 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.9
-   Built on: v1.9.6/1.9.7 (stable baseline you shared)
-   What's new (safe):
-   - Travel intent → Maps tile (retained)
-   - Add Tile uses AI planner but creates a SINGLE tile
-   - Settings (top) wired & working
-   - AI Assistant toggle targets right panel (not left toolbar)
-   - Assistant chat: prevent page reload; calls /api/ai-search
+   LifeCre8 — main.js  v1.9.10
+   Built on: v1.9.9
+   What's new:
+   - Travel intent: normalize queries like “UK holiday ideas” to
+     search within the United Kingdom (less “world map” noise)
+   - Assistant chat is now standalone: uses /api/ai-chat and
+     never triggers Add-Tile logic
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -165,6 +164,32 @@ function mapsTileMarkup(query){
       <iframe src="${embed}" style="width:100%;height:320px;border:0;border-radius:10px"></iframe>
     </div>
   `;
+}
+
+/* ---- NEW: normalize vague/UK travel queries ---- */
+function normalizeTravelQuery(val){
+  const raw = (val || "").trim();
+  if (!raw) return raw;
+
+  // If user says "near me", don't add a country suffix
+  if (/\bnear me\b/i.test(raw)) return raw;
+
+  const ukWords = /\b(uk|u\.k\.|united kingdom|england|scotland|wales|northern ireland)\b/i;
+  const hasPlaceHint = /\b(in|near|around)\s+[A-Za-z][\w\s'-]+$/i.test(raw);
+  const isVeryGeneric = /\b(holiday|holidays|break|breaks|trip|trips|ideas|getaway|getaways|staycation|weekend)\b/i.test(raw);
+
+  // If it already mentions the UK (or nations), ensure the query includes "United Kingdom"
+  if (ukWords.test(raw)) {
+    // Avoid duplicating "United Kingdom" if already present
+    return /united kingdom/i.test(raw) ? raw : `${raw} United Kingdom`;
+  }
+
+  // If it's very generic and has no explicit place, default it to the UK
+  if (!hasPlaceHint && isVeryGeneric) {
+    return `${raw} United Kingdom`;
+  }
+
+  return raw;
 }
 
 /* -----------------------------
@@ -836,11 +861,11 @@ tileSearch.addEventListener("keydown", (e)=>{
   const val = valRaw.replace(/\s+/g, " ");
   let newTile = null;
 
-  /* 1) Travel intent → Maps */
-  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break)/i;
+  /* 1) Travel intent → Maps (normalized) */
+  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|getaway|staycation|weekend)/i;
   const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
   if (TRAVEL_RE.test(val) || GEO_HINT.test(val)) {
-    const q = val.replace(/\bnear me\b/i, "near me");
+    const q = normalizeTravelQuery(val);
     newTile = {
       id: uid(),
       type: "maps",
@@ -933,12 +958,11 @@ tileSearch.addEventListener("keydown", (e)=>{
     newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
   }
 
-  /* 9) Generic topic → AI plan (SINGLE TILE) or RSS+Gallery fallback */
+  /* 9) Generic topic → AI plan (SINGLE TILE) or RSS fallback */
   if (!newTile) {
     fetch(`/api/ai-plan?q=${encodeURIComponent(val)}`, { method:"GET" })
       .then(r=>{ if (!r.ok) throw new Error("ai-plan not available"); return r.json(); })
       .then(plan=>{
-        // plan.tile  (single) OR plan.tiles (multi) → pick first only
         let t = plan.tile || (Array.isArray(plan.tiles) ? plan.tiles[0] : null);
         if (!t) throw new Error("empty ai plan");
 
@@ -955,19 +979,19 @@ tileSearch.addEventListener("keydown", (e)=>{
         } else if (t.type === "gallery" && t.images?.length) {
           made = { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
         } else if (t.type === "maps" && t.q) {
-          made = { id: uid(), type:"maps", title: t.title || `Search — ${t.q}`, meta:{ q: t.q }, content: mapsTileMarkup(t.q) };
+          const qn = normalizeTravelQuery(t.q);
+          made = { id: uid(), type:"maps", title: t.title || `Search — ${qn}`, meta:{ q: qn }, content: mapsTileMarkup(qn) };
         }
 
         if (!made) throw new Error("unsupported ai plan tile type");
 
-        sections.unshift(made); // PREPEND single tile
+        sections.unshift(made);
         localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
         render();
         tileMenu.classList.add("hidden");
         tileSearch.value = "";
       })
       .catch(()=>{
-        // Fallback: Topic RSS (Google News) + Gallery (Unsplash) but still single top-left is RSS
         const gn  = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
         const a = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
         sections.unshift(a);
@@ -981,7 +1005,7 @@ tileSearch.addEventListener("keydown", (e)=>{
   }
 
   // Persist & render for synchronous branches
-  sections.unshift(newTile); // PREPEND
+  sections.unshift(newTile);
   localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
   render();
   tileMenu.classList.add("hidden");
@@ -989,7 +1013,7 @@ tileSearch.addEventListener("keydown", (e)=>{
 });
 
 /* -----------------------------
-   Assistant Toggle & Chat  (fixed)
+   Assistant Toggle & Chat  (standalone chat)
 ----------------------------- */
 const assistantToggle = $("#assistantToggle");
 const assistantPanel  = $("#assistantPanel");
@@ -998,7 +1022,6 @@ const chatForm  = $("#chatForm");
 const chatInput = $("#chatInput");
 
 function updateAssistant() {
-  // Show/hide right panel only; do not touch left toolbar
   assistantPanel.style.display = assistantOn ? "block" : "none";
   assistantToggle?.classList.toggle("primary", assistantOn);
   appEl.classList.toggle("no-right", !assistantOn);
@@ -1027,7 +1050,7 @@ function addChat(role, text){
   renderChat();
 }
 
-// Prevent reload + call AI endpoint
+// Submit → /api/ai-chat (never add tiles)
 chatForm?.addEventListener("submit", async (e)=>{
   e.preventDefault();
   const text = chatInput.value.trim();
@@ -1035,11 +1058,14 @@ chatForm?.addEventListener("submit", async (e)=>{
   addChat('user', text);
   chatInput.value = "";
   try {
-    const r = await fetch(`/api/ai-search?q=${encodeURIComponent(text)}`);
+    const r = await fetch(`/api/ai-chat?q=${encodeURIComponent(text)}`);
+    if (!r.ok) throw new Error("chat endpoint not available");
     const j = await r.json();
+    // Expect shape: { message: string }
     addChat('ai', j.message || "…");
-  } catch {
-    addChat('ai', "Sorry — assistant is temporarily unavailable.");
+  } catch (err) {
+    // Fallback: small echo with a helpful hint
+    addChat('ai', "I couldn't reach the chat service just now. Try again in a moment.");
   }
 });
 
