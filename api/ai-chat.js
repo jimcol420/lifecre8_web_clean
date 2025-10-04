@@ -1,37 +1,61 @@
+// /api/ai-chat.js  — robust, with graceful fallbacks
 export default async function handler(req, res) {
   try {
-    const { searchParams } = new URL(req.url, `http://${req.headers.host}`);
-    const q = (searchParams.get("q") || "").trim();
-    if (!q) return res.status(400).json({ message: "Ask me something." });
+    const q = (req.query.q || req.body?.q || "").toString().trim();
+    if (!q) {
+      return res.status(200).json({ message: "Ask me anything." });
+    }
 
-    const apiKey = process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY_PUBLIC || process.env.OPENAI_KEY;
-    if (!apiKey) return res.status(500).json({ message: "Missing OPENAI_API_KEY" });
+    const key = process.env.OPENAI_API_KEY;
 
+    // If no key is configured, return a friendly stub so the UI works
+    if (!key) {
+      // Small utility: quick local answers for simple questions
+      const lc = q.toLowerCase();
+      if (/^what('?s| is) the time/.test(lc)) {
+        return res.status(200).json({ message: `It's ${new Date().toLocaleString()}.` });
+      }
+      return res.status(200).json({
+        message:
+          "Chat is running in demo mode (no API key on the server). Add OPENAI_API_KEY in Vercel → Settings → Environment Variables and redeploy.",
+      });
+    }
+
+    // Call OpenAI Chat Completions (simple, non-streaming)
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json"
+        "Authorization": `Bearer ${key}`,
+        "Content-Type": "application/json",
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
-          { role: "system", content: "You are the LifeCre8 assistant. Be concise and helpful. Do not talk about tiles unless the user asks about the dashboard." },
-          { role: "user", content: q }
+          { role: "system", content: "You are a concise, helpful assistant." },
+          { role: "user", content: q },
         ],
-        temperature: 0.4
-      })
+        temperature: 0.3,
+      }),
     });
 
     if (!r.ok) {
-      const t = await r.text().catch(()=> "");
-      return res.status(502).json({ message: "Upstream error", detail: t });
+      const text = await r.text().catch(() => "");
+      console.error("OpenAI error:", r.status, text);
+      return res.status(200).json({
+        message: "I had trouble contacting the AI service. Please try again.",
+      });
     }
-    const j = await r.json();
-    const message = j?.choices?.[0]?.message?.content?.trim() || "…";
-    res.setHeader("Cache-Control", "no-store");
-    return res.status(200).json({ message });
+
+    const data = await r.json();
+    const msg =
+      data?.choices?.[0]?.message?.content?.trim() ||
+      "I don't have a response right now.";
+
+    return res.status(200).json({ message: msg });
   } catch (err) {
-    return res.status(500).json({ message: String(err?.message || err) });
+    console.error("ai-chat handler error:", err);
+    return res.status(200).json({
+      message: "Something went wrong on the server. Try again shortly.",
+    });
   }
 }
