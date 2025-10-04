@@ -1,14 +1,15 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.8 (full file)
-   Built from your last stable baseline + targeted fixes:
-   - Travel intent  → Maps tile (Add Tile)
-   - Single-tile AI plan (no multi-tile explosion)
-   - Top bar buttons wired: Settings + AI Assistant (persistent)
-   - Assistant panel input → calls /api/ai-search (with fallback)
-   - No changes to your existing tiles/styles/behaviour otherwise
+   LifeCre8 — main.js  v1.9.9
+   Built on: v1.9.6/1.9.7 (stable baseline you shared)
+   What's new (safe):
+   - Travel intent → Maps tile (retained)
+   - Add Tile uses AI planner but creates a SINGLE tile
+   - Settings (top) wired & working
+   - AI Assistant toggle targets right panel (not left toolbar)
+   - Assistant chat: prevent page reload; calls /api/ai-search
 ============================================================ */
 
-/* ========= KEYS & VERSION ========= */
+/* ===== Keys & Version ===== */
 const K_SECTIONS   = "lifecre8.sections";
 const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
@@ -16,7 +17,7 @@ const K_VERSION    = "lifecre8.version";
 const K_PREFS      = "lifecre8.prefs";
 const DATA_VERSION = 5;
 
-/* ========= PRESETS ========= */
+/* ===== Presets ===== */
 const RSS_PRESETS = {
   world: [
     "https://feeds.bbci.co.uk/news/world/rss.xml",
@@ -43,7 +44,7 @@ const STOCK_PRESETS = {
   "US Indexes": ["^GSPC","^DJI","^IXIC"],
 };
 
-/* ========= STATE ========= */
+/* ===== State ===== */
 let sections    = JSON.parse(localStorage.getItem(K_SECTIONS)  || "[]");
 let assistantOn = localStorage.getItem(K_ASSIST_ON) === null ? true : JSON.parse(localStorage.getItem(K_ASSIST_ON));
 let chat        = JSON.parse(localStorage.getItem(K_CHAT)      || "[]");
@@ -52,29 +53,22 @@ if (!chat.length) chat = [{ role:'ai', text:"Hi! I'm your AI Assistant. Ask me a
 let prefs = JSON.parse(localStorage.getItem(K_PREFS) || "{}");
 if (!prefs.theme)   prefs.theme   = "solar";
 if (!prefs.density) prefs.density = "comfortable";
-
 document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
 document.body.classList.toggle('density-compact',  prefs.density === 'compact');
-document.body.classList.toggle('no-right', !assistantOn); // keep grid width stable when assistant hidden
 
 let dynamicTimers = {};
 let liveIntervals = {};
 
-/* ========= UTILS ========= */
-const $  = s => document.querySelector(s);
-const $$ = s => Array.from(document.querySelectorAll(s));
-const uid = () => Math.random().toString(36).slice(2);
+/* ===== Utils ===== */
+const $  = q => document.querySelector(q);
+const $$ = q => Array.from(document.querySelectorAll(q));
+const uid   = () => Math.random().toString(36).slice(2);
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
-const fmtAgo = (ms) => {
-  const m = Math.round(ms/60000); if (m<60) return `${m}m ago`;
-  const h = Math.round(m/60);     if (h<48) return `${h}h ago`;
-  const d = Math.round(h/24);     return `${d}d ago`;
-};
 
 const appEl = document.querySelector(".app");
 
-/* ========= FULLSCREEN BACKDROP ========= */
+/* Backdrop for fullscreen */
 let fsBackdrop = document.getElementById("fsBackdrop");
 if (!fsBackdrop) {
   fsBackdrop = document.createElement("div");
@@ -82,33 +76,12 @@ if (!fsBackdrop) {
   document.body.appendChild(fsBackdrop);
 }
 
-/* ========= SIMPLE MODAL ========= */
-let modalHost = document.getElementById("modalHost");
-if (!modalHost) {
-  modalHost = document.createElement("div");
-  modalHost.id = "modalHost";
-  document.body.appendChild(modalHost);
-}
-function __openModal(html){
-  modalHost.innerHTML = `
-    <div class="modal-backdrop" data-close></div>
-    <div class="modal">${html}</div>
-  `;
-  requestAnimationFrame(()=> modalHost.classList.add("show"));
-  modalHost.addEventListener("click", (e)=>{
-    if (e.target.hasAttribute("data-close")) __closeModal();
-    if (e.target.closest('[data-action="cancel"]')) __closeModal();
-  }, { once:true });
-}
-function __closeModal(){
-  modalHost.classList.remove("show");
-  modalHost.innerHTML = "";
-}
-
-/* ============================================================
+/* -----------------------------
    YouTube helpers
-============================================================ */
-const YT_DEFAULTS = ["M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk"];
+----------------------------- */
+const YT_DEFAULTS = [
+  "M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk",
+];
 const ytEmbedSrc = (id) => `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
 function ytPlaylistMarkup(playlist, currentId) {
   const ids = (playlist && playlist.length) ? playlist : YT_DEFAULTS;
@@ -136,9 +109,9 @@ function ytPlaylistMarkup(playlist, currentId) {
   `;
 }
 
-/* ============================================================
+/* -----------------------------
    Web tile (generic)
-============================================================ */
+----------------------------- */
 function webTileMarkup(url, mode = "preview") {
   const host = hostOf(url);
   const favicon = host ? `https://www.google.com/s2/favicons?domain=${host}&sz=32` : "";
@@ -174,14 +147,14 @@ function webTileMarkup(url, mode = "preview") {
   `;
 }
 
-/* ============================================================
+/* -----------------------------
    Maps tile (travel intent)
-============================================================ */
+----------------------------- */
 function mapsTileMarkup(query){
-  const embed = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
-  const open  = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
+  const embed   = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
+  const open    = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
   const booking = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(query)}`;
-  const trip   = `https://www.tripadvisor.com/Search?q=${encodeURIComponent(query)}`;
+  const trip    = `https://www.tripadvisor.com/Search?q=${encodeURIComponent(query)}`;
   return `
     <div data-maps>
       <div class="web-actions" style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap">
@@ -194,9 +167,9 @@ function mapsTileMarkup(query){
   `;
 }
 
-/* ============================================================
+/* -----------------------------
    Spotify tile
-============================================================ */
+----------------------------- */
 function spotifyMarkup(spotifyUrl) {
   const src = spotifyUrl.replace("open.spotify.com/", "open.spotify.com/embed/");
   return `
@@ -208,9 +181,9 @@ function spotifyMarkup(spotifyUrl) {
   `;
 }
 
-/* ============================================================
-   RSS tile (compact items, optional thumbs)
-============================================================ */
+/* -----------------------------
+   RSS tile (enriched)
+----------------------------- */
 function rssListMarkup(items) {
   const list = (items || []).map(i => `
     <div class="rss-item" style="display:flex; gap:10px; align-items:flex-start;">
@@ -218,7 +191,7 @@ function rssListMarkup(items) {
                  : `<div style="width:56px;height:56px;border-radius:8px;border:1px solid var(--border);background:#0a1522"></div>`}
       <div>
         <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
-        <div class="muted">${i.source || ''} ${i.pubDate ? `— ${fmtAgo(Date.now()-new Date(i.pubDate).getTime())}`:''}</div>
+        <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
       </div>
     </div>
   `).join("");
@@ -250,6 +223,7 @@ function rssErrorMarkup() {
 function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
+
   const url = `/api/rss?full=1&url=${encodeURIComponent(feeds[0])}`;
   fetch(url)
     .then(r=>r.json())
@@ -263,9 +237,9 @@ function loadRssInto(card, feeds, attempt=1) {
     });
 }
 
-/* ============================================================
+/* -----------------------------
    Gallery
-============================================================ */
+----------------------------- */
 function galleryMarkup(urls) {
   const imgs = (urls || []).map(u => `<img src="${u}" alt="">`).join("");
   return `
@@ -276,9 +250,9 @@ function galleryMarkup(urls) {
   `;
 }
 
-/* ============================================================
-   Markets (with live updater)
-============================================================ */
+/* -----------------------------
+   Markets
+----------------------------- */
 function tickerMarkup(symbols) {
   const rows = symbols.map(sym => `
     <div class="trow" data-sym="${sym}">
@@ -321,9 +295,9 @@ function loadQuotesInto(card, symbols) {
     });
 }
 
-/* ============================================================
+/* -----------------------------
    Football (simulated fallback)
-============================================================ */
+----------------------------- */
 function footballMarkupSeed() {
   const matches = [
     { home:"Arsenal", away:"Chelsea", hs:0, as:0, min:0, status:"KO 20:00", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/gb-eng.png", awayBadge:"https://flagcdn.com/w20/gb-eng.png" },
@@ -341,9 +315,9 @@ function footballMarkupSeed() {
   return `<div class="scores" data-matches="${encodeURIComponent(JSON.stringify(matches))}">${rows}</div>`;
 }
 
-/* ============================================================
-   Defaults & versioning
-============================================================ */
+/* -----------------------------
+   Defaults
+----------------------------- */
 function gallerySeed() {
   return [
     "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?q=80&w=600&auto=format&fit=crop",
@@ -364,6 +338,10 @@ function defaultSections() {
     { id: uid(), type:"gallery",  title:"Gallery",     meta:{ urls: gallerySeed() }, content: galleryMarkup(gallerySeed()) }
   ];
 }
+
+/* -----------------------------
+   Storage versioning / seed
+----------------------------- */
 function ensureVersion() {
   const current = parseInt(localStorage.getItem(K_VERSION) || "0", 10);
   if (!sections.length) {
@@ -375,9 +353,9 @@ function ensureVersion() {
   }
 }
 
-/* ============================================================
+/* -----------------------------
    Rendering
-============================================================ */
+----------------------------- */
 function tileContentFor(section) {
   switch (section.type) {
     case "youtube": {
@@ -424,7 +402,6 @@ function render() {
   stopLiveIntervals();
 
   const grid = $("#grid");
-  if (!grid) return;
   grid.innerHTML = "";
 
   const others = sections.filter(s=>s.type!=="email");
@@ -447,14 +424,13 @@ function render() {
 
   initDynamicTiles();
   initLiveFeeds();
-  renderAssistant();
 }
 
-/* ============================================================
+/* -----------------------------
    Delegated handlers
-============================================================ */
+----------------------------- */
 (function attachDelegatesOnce(){
-  const grid = document.body;
+  const grid = $("#grid");
 
   // Expand / Collapse
   grid.addEventListener("click", (e)=>{
@@ -730,86 +706,22 @@ function render() {
       return;
     }
     const close = e.target.closest(".gallery-view");
-    if (close) close.classList.remove("show");
-  });
-
-  // Top bar: Settings + AI Assistant toggle (text-based match + ID fallbacks)
-  document.addEventListener("click", (e)=>{
-    const btn = e.target.closest("button");
-    if (!btn) return;
-    const label = (btn.textContent||"").trim().toLowerCase();
-
-    // Settings button (top)
-    if (btn.id === "settingsBtnTop" || label === "settings") {
-      const html = `
-        <div class="modal-card">
-          <h2>Settings</h2>
-          <div class="field">
-            <label>Theme</label>
-            <select class="input" id="pref_theme">
-              <option value="solar" ${prefs.theme==='solar'?'selected':''}>Solar</option>
-              <option value="ice" ${prefs.theme==='ice'?'selected':''}>Ice</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>Density</label>
-            <select class="input" id="pref_density">
-              <option value="comfortable" ${prefs.density==='comfortable'?'selected':''}>Comfortable</option>
-              <option value="compact" ${prefs.density==='compact'?'selected':''}>Compact</option>
-            </select>
-          </div>
-          <div class="actions" style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
-            <button class="btn sm" data-action="cancel">Close</button>
-            <button class="btn sm primary" id="savePrefs">Save</button>
-          </div>
-        </div>
-      `;
-      __openModal(html);
-      $("#savePrefs")?.addEventListener("click", ()=>{
-        prefs.theme = $("#pref_theme").value;
-        prefs.density = $("#pref_density").value;
-        localStorage.setItem(K_PREFS, JSON.stringify(prefs));
-        document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
-        document.body.classList.toggle('density-compact',  prefs.density === 'compact');
-        __closeModal();
-      }, { once:true });
-      return;
-    }
-
-    // AI Assistant toggle (top)
-    if (btn.id === "aiAssistantBtnTop" || label === "ai assistant") {
-      assistantOn = !assistantOn;
-      localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
-      document.body.classList.toggle('no-right', !assistantOn);
-      renderAssistant();
-      return;
+    if (close) {
+      close.classList.remove("show");
     }
   });
 })();
 
-/* ============================================================
+/* -----------------------------
    Dynamic tiles & live feeds
-============================================================ */
-function stopDynamicTimers(){ Object.values(dynamicTimers).forEach(clearInterval); dynamicTimers = {}; }
-function stopLiveIntervals(){ Object.values(liveIntervals).forEach(clearInterval); liveIntervals = {}; }
-
-function seedPrice(sym){ if (sym.includes("BTC")) return 65000 + Math.random()*4000; if (sym.includes("ETH")) return 3200 + Math.random()*300; return 100 + Math.random()*100; }
-function stepPrice(p){ const drift = (Math.random()-0.5) * (p*0.004); return Math.max(0.01, p + drift); }
-function renderTicker(card, prices, prev){
-  const rows = card.querySelectorAll(".trow");
-  rows.forEach(row=>{
-    const sym = row.dataset.sym;
-    const priceEl = row.querySelector("[data-price]");
-    const chgEl   = row.querySelector("[data-chg]");
-    const price = prices[sym];
-    const last  = prev[sym] ?? price;
-    const delta = price - last;
-    const pct   = (delta/last)*100;
-    priceEl.textContent = price.toFixed(2);
-    chgEl.textContent   = `${delta>=0?"+":""}${delta.toFixed(2)}  (${pct>=0?"+":""}${pct.toFixed(2)}%)`;
-    row.classList.toggle("up",   delta >= 0);
-    row.classList.toggle("down", delta <  0);
-  });
+----------------------------- */
+function stopDynamicTimers(){
+  Object.values(dynamicTimers).forEach(clearInterval);
+  dynamicTimers = {};
+}
+function stopLiveIntervals(){
+  Object.values(liveIntervals).forEach(clearInterval);
+  liveIntervals = {};
 }
 function initDynamicTiles(){
   // Football heartbeat (simulated)
@@ -823,7 +735,7 @@ function initDynamicTiles(){
 
     const timer = setInterval(()=>{
       let changed = false;
-      matches.forEach((m)=>{
+      matches.forEach((m, i)=>{
         if (!m.started && Math.random() < 0.3) { m.started = true; m.min = 1; m.status = "1'"; changed = true; }
         else if (m.started && !m.finished) {
           if (Math.random() < 0.7) { m.min = clamp(m.min + 1, 1, 95); m.status = m.min >= 90 ? `90'+` : `${m.min}'`; changed = true; }
@@ -881,219 +793,351 @@ function initLiveFeeds(){
   });
 }
 
-/* ============================================================
-   Add Tile — AI assisted, single tile, travel intent
-============================================================ */
-function makeTileFromPlanItem(t, topic){
-  if (t.type === "rss" && t.feeds?.length)
-    return { id: uid(), type:"rss", title: t.title || `Daily Brief — ${topic}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
-  if (t.type === "web" && t.url)
-    return { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
-  if (t.type === "youtube" && t.playlist?.length) {
-    const cur = t.playlist[0];
-    return { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
-  }
-  if (t.type === "stocks" && t.symbols?.length)
-    return { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
-  if (t.type === "gallery" && t.images?.length)
-    return { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
-  if (t.type === "maps" && t.q)
-    return { id: uid(), type:"maps", title: t.title || `Search — ${t.q}`, meta:{ q: t.q }, content: mapsTileMarkup(t.q) };
-  return null;
+/* stock fallbacks */
+function seedPrice(sym){ if (sym.includes("BTC")) return 65000 + Math.random()*4000; if (sym.includes("ETH")) return 3200 + Math.random()*300; return 100 + Math.random()*100; }
+function stepPrice(p){ const drift = (Math.random()-0.5) * (p*0.004); return Math.max(0.01, p + drift); }
+function renderTicker(card, prices, prev){
+  const rows = card.querySelectorAll(".trow");
+  rows.forEach(row=>{
+    const sym = row.dataset.sym;
+    const priceEl = row.querySelector("[data-price]");
+    const chgEl   = row.querySelector("[data-chg]");
+    const price = prices[sym];
+    const last  = prev[sym] ?? price;
+    const delta = price - last;
+    const pct   = (delta/last)*100;
+    priceEl.textContent = price.toFixed(2);
+    chgEl.textContent   = `${delta>=0?"+":""}${delta.toFixed(2)}  (${pct>=0?"+":""}${pct.toFixed(2)}%)`;
+    row.classList.toggle("up",   delta >= 0);
+    row.classList.toggle("down", delta <  0);
+  });
 }
 
-function addTileFlow(raw){
-  const val = (raw||"").trim();
-  if (!val) return;
+/* -----------------------------
+   Add Tile (with intents + AI single-tile)
+----------------------------- */
+const addBtn     = $("#addTileBtnTop");
+const tileMenu   = $("#tileMenu");
+const tileSearch = $("#tileSearch");
 
-  // Travel intent → Maps (keywords & “near me” / “in <city>”)
-  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|holidays)/i;
+addBtn.addEventListener("click", () => {
+  tileMenu.classList.toggle("hidden");
+  if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
+});
+
+tileSearch.addEventListener("keydown", (e)=>{
+  if (e.key !== "Enter") {
+    if (e.key === "Escape") tileMenu.classList.add("hidden");
+    return;
+  }
+
+  const valRaw = tileSearch.value.trim();
+  if (!valRaw) return;
+  const val = valRaw.replace(/\s+/g, " ");
+  let newTile = null;
+
+  /* 1) Travel intent → Maps */
+  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break)/i;
   const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
   if (TRAVEL_RE.test(val) || GEO_HINT.test(val)) {
     const q = val.replace(/\bnear me\b/i, "near me");
-    const tile = { id: uid(), type: "maps", title: `Search — ${val}`, meta: { q }, content: mapsTileMarkup(q) };
-    sections.unshift(tile);
-    localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-    render();
-    return;
+    newTile = {
+      id: uid(),
+      type: "maps",
+      title: `Search — ${val}`,
+      meta: { q },
+      content: mapsTileMarkup(q)
+    };
   }
 
-  // URLs → Web
-  if (/^https?:\/\//i.test(val)) {
-    const url = val;
-    const tile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
-    sections.unshift(tile);
-    localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-    render();
-    return;
-  }
-
-  // News quick command
-  const mNews = val.match(/^news(?:\s+(.+))?$/i);
-  if (mNews) {
-    const topic = (mNews[1]||"").trim();
-    if (!topic) {
-      const feeds = RSS_PRESETS.uk;
-      const tile = { id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() };
-      sections.unshift(tile);
-      localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-      render();
-      return;
-    } else {
-      const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
-      const tile = { id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
-      sections.unshift(tile);
-      localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-      render();
-      return;
+  /* 2) Quick commands: "news" / "news <topic>" */
+  if (!newTile) {
+    const mNews = val.match(/^news(?:\s+(.+))?$/i);
+    if (mNews) {
+      const topic = (mNews[1]||"").trim();
+      if (!topic) {
+        const feeds = RSS_PRESETS.uk;
+        newTile = { id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() };
+      } else {
+        const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
+        newTile = { id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
+      }
     }
   }
 
-  // Otherwise → ask planner for ONE tile
-  fetch(`/api/ai-plan?q=${encodeURIComponent(val)}`, { method:"GET" })
-    .then(r=>r.ok ? r.json() : Promise.reject(new Error("bad")))
-    .then(plan=>{
-      const list = Array.isArray(plan.tiles) ? plan.tiles : [];
-      const first = list[0];
-      let tile = first ? makeTileFromPlanItem(first, val) : null;
-
-      // If planner returned multiple, still enforce single-tile (first only).
-      if (!tile) {
-        // sensible fallback guess: recipes → web search, products → web search, topics → rss
-        if (/\b(recipe|recipes|how to|guide|tutorial)\b/i.test(val)) {
-          const url = `https://www.google.com/search?q=${encodeURIComponent(val)}`;
-          tile = { id: uid(), type:"web", title:"Search …", meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
-        } else {
-          const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
-          tile = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() };
-        }
-      }
-      sections.unshift(tile);
-      localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-      render();
-    })
-    .catch(()=>{
-      // Network/endpoint fallback → Web search tile
-      const url = `https://www.google.com/search?q=${encodeURIComponent(val)}`;
-      const tile = { id: uid(), type:"web", title:"Search …", meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
-      sections.unshift(tile);
-      localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-      render();
-    });
-}
-
-/* Wire the “Add Tile” button:
-   - If your page already has a menu + input (#tileMenu / #tileSearch),
-     we’ll use that. Otherwise we’ll show a quick modal prompt. */
-function attachAddTileButton(){
-  const btn = $("#addTileBtnTop") || $$("button").find(b => (b.textContent||"").trim().toLowerCase() === "add tile");
-  if (!btn) return;
-
-  const menu = $("#tileMenu");
-  const input = $("#tileSearch");
-
-  if (menu && input) {
-    btn.addEventListener("click", ()=>{
-      menu.classList.toggle("hidden");
-      if (!menu.classList.contains("hidden")) input.focus();
-    });
-    input.addEventListener("keydown", (e)=>{
-      if (e.key === "Enter") {
-        const q = input.value;
-        if (q.trim()) addTileFlow(q);
-        menu.classList.add("hidden");
-        input.value = "";
-      }
-      if (e.key === "Escape") menu.classList.add("hidden");
-    });
-  } else {
-    btn.addEventListener("click", ()=>{
-      const html = `
-        <div class="modal-card">
-          <h2>Add Tile</h2>
-          <div class="field">
-            <label>What do you want?</label>
-            <input class="input" id="add_q" placeholder="e.g., cars for sale in Manchester, chocolate cake recipes, spa weekend in Bath">
-          </div>
-          <div class="actions" style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
-            <button class="btn sm" data-action="cancel">Cancel</button>
-            <button class="btn sm primary" id="addGo">Create</button>
-          </div>
+  /* 3) Football fixtures today */
+  if (!newTile && /(football|soccer).*(fixtures|today|scores)/i.test(val)) {
+    const fixUrl = "https://www.bbc.co.uk/sport/football/scores-fixtures";
+    const html = `
+      <div>
+        <div class="muted">Quick fixtures snapshot — open BBC for full details.</div>
+        <ul id="fx-quick" style="margin:8px 0 12px; display:grid; gap:6px;"></ul>
+        <div class="web-actions">
+          <button class="btn sm web-toggle" data-mode="embed">Embed</button>
+          <a class="btn sm" href="${fixUrl}" target="_blank" rel="noopener">Open</a>
         </div>
-      `;
-      __openModal(html);
-      $("#add_q")?.focus();
-      $("#addGo")?.addEventListener("click", ()=>{
-        const q = $("#add_q")?.value || "";
-        __closeModal();
-        addTileFlow(q);
-      }, { once:true });
-    });
+      </div>`;
+    newTile = { id: uid(), type: "web", title: "Football — Fixtures (Today)", meta:{ url: fixUrl, mode:"preview" }, content: html };
+    setTimeout(()=>{
+      const card = document.querySelector(`.card[data-id="${newTile.id}"]`);
+      const list = card?.querySelector('#fx-quick');
+      if (!list) return;
+      fetch(`/api/rss?url=${encodeURIComponent('https://feeds.bbci.co.uk/sport/football/rss.xml')}`)
+        .then(r=>r.json()).then(data=>{
+          const items = (data.items||[]).slice(0,5);
+          list.innerHTML = items.map(i=>`<li><a href="${i.link}" target="_blank" rel="noopener">${i.title}</a></li>`).join("");
+        })
+        .catch(()=>{ list.innerHTML = `<li class="muted">Open for full fixtures →</li>`; });
+    }, 80);
   }
-}
 
-/* ============================================================
-   Assistant (right pane)
-============================================================ */
-function assistantDom(){
-  const root = document.querySelector("#assistant") || document.querySelector(".assistant") || document.querySelector("aside");
-  if (!root) return null;
-  const feed = root.querySelector(".ai-feed") || root.querySelector(".feed");
-  const input = root.querySelector("input, textarea");
-  const send  = root.querySelector(".ai-send, button.send, .send");
-  return { root, feed, input, send };
-}
-function renderAssistant(){
-  const dom = assistantDom();
-  if (!dom) return;
-  dom.root.classList.toggle("hidden", !assistantOn);
-
-  // Render messages (very light UI)
-  if (dom.feed) {
-    dom.feed.innerHTML = chat.map(m => `
-      <div class="msg ${m.role}">
-        <div class="bubble">${m.text}</div>
-      </div>
-    `).join("");
-    dom.feed.scrollTop = dom.feed.scrollHeight;
+  /* 4) YouTube */
+  if (!newTile) {
+    const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
+    if (ytUrl) {
+      const videoId = ytUrl[1];
+      const playlist = [videoId, ...YT_DEFAULTS.filter(x=>x!==videoId)].slice(0,4);
+      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:videoId}, content: ytPlaylistMarkup(playlist, videoId) };
+    } else if (/^youtube\s+/i.test(val)) {
+      const playlist = [...YT_DEFAULTS];
+      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
+    }
   }
-}
-function pushChat(role, text){
-  chat.push({ role, text });
-  localStorage.setItem(K_CHAT, JSON.stringify(chat));
-  renderAssistant();
-}
-function attachAssistantHandlers(){
-  const dom = assistantDom();
-  if (!dom) return;
 
-  const sendIt = ()=>{
-    const val = (dom.input?.value || "").trim();
-    if (!val) return;
-    pushChat("user", val);
-    dom.input.value = "";
+  /* 5) Spotify */
+  if (!newTile && /spotify/i.test(val)) {
+    const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
+    newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
+  }
 
-    // Call ai-search for a concise answer. Fallback: echo.
-    fetch(`/api/ai-search?q=${encodeURIComponent(val)}`)
-      .then(r=>r.ok ? r.json() : Promise.reject(new Error("bad")))
-      .then(data=>{
-        const msg = (data && data.message) ? data.message : JSON.stringify(data);
-        pushChat("ai", msg || "Okay.");
+  /* 6) Stocks */
+  if (!newTile && /stocks?|markets?/i.test(val)) {
+    const symbols = ["AAPL","MSFT","BTC-USD"];
+    newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
+  }
+
+  /* 7) Weather (stub) */
+  if (!newTile && /weather/i.test(val)) {
+    const html = `
+      <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
+      <div class="row" style="margin-top:8px">
+        <div>🌤️</div><div class="muted">Partly cloudy</div><div>18°C</div>
+      </div>`;
+    newTile = { id: uid(), type:"weather", title:"Weather", content: html };
+  }
+
+  /* 8) URL → Web */
+  const isUrl = /^https?:\/\//i.test(val);
+  if (!newTile && isUrl) {
+    const url = val;
+    newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+  }
+
+  /* 9) Generic topic → AI plan (SINGLE TILE) or RSS+Gallery fallback */
+  if (!newTile) {
+    fetch(`/api/ai-plan?q=${encodeURIComponent(val)}`, { method:"GET" })
+      .then(r=>{ if (!r.ok) throw new Error("ai-plan not available"); return r.json(); })
+      .then(plan=>{
+        // plan.tile  (single) OR plan.tiles (multi) → pick first only
+        let t = plan.tile || (Array.isArray(plan.tiles) ? plan.tiles[0] : null);
+        if (!t) throw new Error("empty ai plan");
+
+        let made = null;
+        if (t.type === "rss" && t.feeds?.length) {
+          made = { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
+        } else if (t.type === "web" && t.url) {
+          made = { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
+        } else if (t.type === "youtube" && t.playlist?.length) {
+          const cur = t.playlist[0];
+          made = { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
+        } else if (t.type === "stocks" && t.symbols?.length) {
+          made = { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
+        } else if (t.type === "gallery" && t.images?.length) {
+          made = { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
+        } else if (t.type === "maps" && t.q) {
+          made = { id: uid(), type:"maps", title: t.title || `Search — ${t.q}`, meta:{ q: t.q }, content: mapsTileMarkup(t.q) };
+        }
+
+        if (!made) throw new Error("unsupported ai plan tile type");
+
+        sections.unshift(made); // PREPEND single tile
+        localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+        render();
+        tileMenu.classList.add("hidden");
+        tileSearch.value = "";
       })
-      .catch(()=> pushChat("ai", "Got it. (Live search temporarily unavailable.)"));
+      .catch(()=>{
+        // Fallback: Topic RSS (Google News) + Gallery (Unsplash) but still single top-left is RSS
+        const gn  = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
+        const a = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
+        sections.unshift(a);
+        localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+        render();
+        tileMenu.classList.add("hidden");
+        tileSearch.value = "";
+      });
+
+    return; // async path ends here
+  }
+
+  // Persist & render for synchronous branches
+  sections.unshift(newTile); // PREPEND
+  localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+  render();
+  tileMenu.classList.add("hidden");
+  tileSearch.value = "";
+});
+
+/* -----------------------------
+   Assistant Toggle & Chat  (fixed)
+----------------------------- */
+const assistantToggle = $("#assistantToggle");
+const assistantPanel  = $("#assistantPanel");
+const chatLog   = $("#assistantChat");
+const chatForm  = $("#chatForm");
+const chatInput = $("#chatInput");
+
+function updateAssistant() {
+  // Show/hide right panel only; do not touch left toolbar
+  assistantPanel.style.display = assistantOn ? "block" : "none";
+  assistantToggle?.classList.toggle("primary", assistantOn);
+  appEl.classList.toggle("no-right", !assistantOn);
+  localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
+}
+assistantToggle?.addEventListener("click", (e) => {
+  e.preventDefault();
+  assistantOn = !assistantOn;
+  updateAssistant();
+});
+
+function renderChat(){
+  if (!chatLog) return;
+  chatLog.innerHTML = "";
+  chat.forEach(m=>{
+    const d = document.createElement("div");
+    d.className = `msg ${m.role}`;
+    d.textContent = m.text;
+    chatLog.appendChild(d);
+  });
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+function addChat(role, text){
+  chat.push({role, text});
+  localStorage.setItem(K_CHAT, JSON.stringify(chat));
+  renderChat();
+}
+
+// Prevent reload + call AI endpoint
+chatForm?.addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const text = chatInput.value.trim();
+  if (!text) return;
+  addChat('user', text);
+  chatInput.value = "";
+  try {
+    const r = await fetch(`/api/ai-search?q=${encodeURIComponent(text)}`);
+    const j = await r.json();
+    addChat('ai', j.message || "…");
+  } catch {
+    addChat('ai', "Sorry — assistant is temporarily unavailable.");
+  }
+});
+
+/* -----------------------------
+   Global settings (Top button)
+----------------------------- */
+$("#globalSettingsBtn")?.addEventListener("click", ()=>{
+  const html = `
+    <div class="modal-card">
+      <h2>Global Settings</h2>
+      <div class="field">
+        <label>Theme</label>
+        <select class="input" id="g_theme">
+          <option value="solar" ${prefs.theme==='solar'?'selected':''}>Solar (Dark)</option>
+          <option value="ice" ${prefs.theme==='ice'?'selected':''}>Ice (Light)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Density</label>
+        <select class="input" id="g_density">
+          <option value="comfortable" ${prefs.density==='comfortable'?'selected':''}>Comfortable</option>
+          <option value="compact" ${prefs.density==='compact'?'selected':''}>Compact</option>
+        </select>
+      </div>
+      <div class="actions" style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn sm" data-action="cancel">Cancel</button>
+        <button class="btn sm" id="resetLayout">Reset Layout</button>
+        <button class="btn sm primary" data-action="save" id="g_save">Save</button>
+      </div>
+    </div>
+  `;
+  __openModal(html);
+  $("#g_save")?.addEventListener("click", ()=>{
+    const theme = $("#g_theme").value;
+    const density = $("#g_density").value;
+    prefs.theme = theme; prefs.density = density;
+    localStorage.setItem(K_PREFS, JSON.stringify(prefs));
+    document.body.classList.toggle('theme-ice', theme === 'ice');
+    document.body.classList.toggle('density-compact', density === 'compact');
+    __closeModal();
+  }, { once:true });
+  $("#resetLayout")?.addEventListener("click", ()=>{
+    localStorage.removeItem(K_SECTIONS);
+    localStorage.removeItem(K_VERSION);
+    navigator.serviceWorker?.getRegistrations?.().then(rs=>rs.forEach(r=>r.unregister()));
+    location.reload();
+  }, { once:true });
+});
+
+/* -----------------------------
+   Modal close safety net
+----------------------------- */
+(function modalSafetyNet(){
+  const modal = document.getElementById('modal');
+  const backdrop = document.getElementById('fsBackdrop');
+
+  function isOpen() {
+    return modal && !modal.classList.contains('hidden') && modal.classList.contains('show');
+  }
+  window.__openModal = window.__openModal || function(html){
+    if (!modal) return;
+    modal.innerHTML = html || modal.innerHTML;
+    modal.classList.remove('hidden');
+    modal.classList.add('show');
+    document.body.style.overflow = 'hidden';
+    if (backdrop) backdrop.classList.remove('show');
+  };
+  window.__closeModal = window.__closeModal || function(){
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.classList.remove('show');
+    modal.innerHTML = '';
+    document.body.style.overflow = '';
+    if (backdrop) backdrop.classList.remove('show');
   };
 
-  dom.send?.addEventListener("click", sendIt);
-  dom.input?.addEventListener("keydown", (e)=>{ if (e.key === "Enter") sendIt(); });
-}
+  if (modal) {
+    modal.addEventListener('click', (e)=>{
+      if (e.target === modal) window.__closeModal();
+    });
+    modal.addEventListener('click', (e)=>{
+      const closeBtn = e.target.closest('[data-action="close"],[data-action="cancel"],[data-action="dismiss"]');
+      const saveBtn  = e.target.closest('[data-action="save"],[data-action="ok"],[data-action="apply"]');
+      if (closeBtn || saveBtn) window.__closeModal();
+    });
+  }
+  document.addEventListener('keydown', (e)=>{
+    if (e.key === 'Escape' && isOpen()) window.__closeModal();
+  });
+})();
 
-/* ============================================================
+/* -----------------------------
    Init
-============================================================ */
+----------------------------- */
 document.addEventListener("DOMContentLoaded", () => {
-  $("#yr") && ($("#yr").textContent = new Date().getFullYear());
+  $("#yr").textContent = new Date().getFullYear();
   ensureVersion();
+  updateAssistant();   // uses K_ASSIST_ON state
+  renderChat();        // renders existing chat log
   render();
-  attachAddTileButton();
-  attachAssistantHandlers();
 });
