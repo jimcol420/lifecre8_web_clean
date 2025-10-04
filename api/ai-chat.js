@@ -1,43 +1,37 @@
-// api/ai-chat.js
-// Standalone assistant reply for the right-hand chat pane.
-// Expects process.env.OPENAI_API_KEY (project-level env var).
-
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Use POST" });
-    return;
-  }
   try {
-    const { messages } = req.body || {};
-    if (!Array.isArray(messages) || !messages.length) {
-      res.status(400).json({ error: "messages required" });
-      return;
-    }
+    const { searchParams } = new URL(req.url, `http://${req.headers.host}`);
+    const q = (searchParams.get("q") || "").trim();
+    if (!q) return res.status(400).json({ message: "Ask me something." });
 
-    // Minimal call using OpenAI Chat Completions API (via fetch)
+    const apiKey = process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY_PUBLIC || process.env.OPENAI_KEY;
+    if (!apiKey) return res.status(500).json({ message: "Missing OPENAI_API_KEY" });
+
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Authorization": `Bearer ${apiKey}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini", // small, cheap, good for chat
-        messages: messages.map(m => ({ role: m.role, content: m.content })),
-        temperature: 0.3
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "You are the LifeCre8 assistant. Be concise and helpful. Do not talk about tiles unless the user asks about the dashboard." },
+          { role: "user", content: q }
+        ],
+        temperature: 0.4
       })
     });
 
     if (!r.ok) {
-      const errText = await r.text().catch(()=>"(no body)");
-      res.status(500).json({ error: "openai failed", details: errText });
-      return;
+      const t = await r.text().catch(()=> "");
+      return res.status(502).json({ message: "Upstream error", detail: t });
     }
-
-    const data = await r.json();
-    const reply = data.choices?.[0]?.message?.content || "(no content)";
-    res.status(200).json({ reply });
-  } catch (e) {
-    res.status(500).json({ error: "server error", details: String(e?.message || e) });
+    const j = await r.json();
+    const message = j?.choices?.[0]?.message?.content?.trim() || "…";
+    res.setHeader("Cache-Control", "no-store");
+    return res.status(200).json({ message });
+  } catch (err) {
+    return res.status(500).json({ message: String(err?.message || err) });
   }
 }

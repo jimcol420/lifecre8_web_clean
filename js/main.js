@@ -1,11 +1,11 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.9.8
-   Built on: v1.9.5 baseline (keeps layout & tiles)
-   Changes:
-   - Maps tiles now use Nominatim (OSM) geocoding and embed a
-     correctly centered OSM map (no random-Pacific pin).
-   - Assistant panel is a standalone chat wired to /api/ai-chat.
-   - Add-Tile keeps: travel intent → Maps; AI single-tile fallback.
+   LifeCre8 — main.js  v1.9.10
+   Built on: v1.9.9
+   What's new:
+   - Travel intent: normalize queries like “UK holiday ideas”
+     to search within the United Kingdom (less “world map” noise)
+   - Assistant chat is standalone: uses /api/ai-chat and
+     never triggers Add-Tile logic
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -61,11 +61,13 @@ let liveIntervals = {};
 /* ===== Utils ===== */
 const $  = q => document.querySelector(q);
 const $$ = q => Array.from(document.querySelectorAll(q));
-const uid = () => Math.random().toString(36).slice(2);
+const uid   = () => Math.random().toString(36).slice(2);
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
 
-/* ===== Backdrop for fullscreen ===== */
+const appEl = document.querySelector(".app");
+
+/* Backdrop for fullscreen */
 let fsBackdrop = document.getElementById("fsBackdrop");
 if (!fsBackdrop) {
   fsBackdrop = document.createElement("div");
@@ -145,54 +147,36 @@ function webTileMarkup(url, mode = "preview") {
 }
 
 /* -----------------------------
-   Maps tile (geocoded, OSM embed)
+   Maps tile (travel intent)
 ----------------------------- */
 function mapsTileMarkup(query){
-  const q = (query || "").trim();
+  const embed   = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
+  const open    = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
+  const booking = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(query)}`;
+  const trip    = `https://www.tripadvisor.com/Search?q=${encodeURIComponent(query)}`;
   return `
-    <div class="maps-tile" data-maps data-q="${q.replace(/"/g,'&quot;')}">
+    <div data-maps>
       <div class="web-actions" style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap">
-        <a class="btn sm" target="_blank" rel="noopener"
-           href="https://www.google.com/maps/search/${encodeURIComponent(q)}">Open Maps</a>
-        <a class="btn sm" target="_blank" rel="noopener"
-           href="https://www.booking.com/searchresults.html?ss=${encodeURIComponent(q)}">Booking</a>
-        <a class="btn sm" target="_blank" rel="noopener"
-           href="https://www.tripadvisor.com/Search?q=${encodeURIComponent(q)}">Tripadvisor</a>
+        <a class="btn sm" href="${open}" target="_blank" rel="noopener">Open Maps</a>
+        <a class="btn sm" href="${booking}" target="_blank" rel="noopener">Booking</a>
+        <a class="btn sm" href="${trip}" target="_blank" rel="noopener">Tripadvisor</a>
       </div>
-      <div class="muted">Finding location…</div>
-      <iframe style="display:none;width:100%;height:320px;border:0;border-radius:10px"></iframe>
+      <iframe src="${embed}" style="width:100%;height:320px;border:0;border-radius:10px"></iframe>
     </div>
   `;
 }
-function initMapsEmbeds(){
-  document.querySelectorAll('.maps-tile[data-maps]').forEach(tile=>{
-    if (tile.dataset.ready) return; tile.dataset.ready = "1";
-    const q = tile.dataset.q || "";
-    const status = tile.querySelector('.muted');
-    const frame  = tile.querySelector('iframe');
 
-    const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`;
-    fetch(url, { headers: { 'Accept-Language':'en', 'User-Agent':'LifeCre8/1.0 (lifec)' }})
-      .then(r=>r.json())
-      .then(res=>{
-        if (!Array.isArray(res) || !res.length) throw new Error("no result");
-        const hit = res[0];
-        const lat = Number(hit.lat), lon = Number(hit.lon);
-        const bb = hit.boundingbox || [];
-        const south = Number(bb[0] ?? (lat-0.5));
-        const north = Number(bb[1] ?? (lat+0.5));
-        const west  = Number(bb[2] ?? (lon-0.5));
-        const east  = Number(bb[3] ?? (lon+0.5));
-        const embed = `https://www.openstreetmap.org/export/embed.html?bbox=${west},${south},${east},${north}&layer=mapnik&marker=${lat},${lon}`;
-        frame.src = embed;
-        frame.style.display = "block";
-        if (status) status.remove();
-      })
-      .catch(()=>{
-        if (status) status.textContent = "Couldn’t locate that place. Try refining (e.g., “Yorkshire, UK”).";
-        frame.remove();
-      });
-  });
+/* ---- UK travel normalization ---- */
+function normalizeTravelQuery(val){
+  const raw = (val || "").trim();
+  if (!raw) return raw;
+  if (/\bnear me\b/i.test(raw)) return raw; // don't touch
+  const ukWords = /\b(uk|u\.k\.|united kingdom|england|scotland|wales|northern ireland)\b/i;
+  const hasPlaceHint = /\b(in|near|around)\s+[A-Za-z][\w\s'-]+$/i.test(raw);
+  const isGeneric = /\b(holiday|holidays|break|breaks|trip|trips|ideas|getaway|getaways|staycation|weekend)\b/i.test(raw);
+  if (ukWords.test(raw)) return /united kingdom/i.test(raw) ? raw : `${raw} United Kingdom`;
+  if (!hasPlaceHint && isGeneric) return `${raw} United Kingdom`;
+  return raw;
 }
 
 /* -----------------------------
@@ -251,6 +235,7 @@ function rssErrorMarkup() {
 function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
+
   const url = `/api/rss?full=1&url=${encodeURIComponent(feeds[0])}`;
   fetch(url)
     .then(r=>r.json())
@@ -323,7 +308,7 @@ function loadQuotesInto(card, symbols) {
 }
 
 /* -----------------------------
-   Football (simulated)
+   Football (simulated fallback)
 ----------------------------- */
 function footballMarkupSeed() {
   const matches = [
@@ -429,7 +414,6 @@ function render() {
   stopLiveIntervals();
 
   const grid = $("#grid");
-  if (!grid) return;
   grid.innerHTML = "";
 
   const others = sections.filter(s=>s.type!=="email");
@@ -452,7 +436,6 @@ function render() {
 
   initDynamicTiles();
   initLiveFeeds();
-  initMapsEmbeds();
 }
 
 /* -----------------------------
@@ -460,7 +443,6 @@ function render() {
 ----------------------------- */
 (function attachDelegatesOnce(){
   const grid = $("#grid");
-  if (!grid) return;
 
   // Expand / Collapse
   grid.addEventListener("click", (e)=>{
@@ -745,9 +727,14 @@ function render() {
 /* -----------------------------
    Dynamic tiles & live feeds
 ----------------------------- */
-function stopDynamicTimers(){ Object.values(dynamicTimers).forEach(clearInterval); dynamicTimers = {}; }
-function stopLiveIntervals(){ Object.values(liveIntervals).forEach(clearInterval); liveIntervals = {}; }
-
+function stopDynamicTimers(){
+  Object.values(dynamicTimers).forEach(clearInterval);
+  dynamicTimers = {};
+}
+function stopLiveIntervals(){
+  Object.values(liveIntervals).forEach(clearInterval);
+  liveIntervals = {};
+}
 function initDynamicTiles(){
   // Football heartbeat (simulated)
   $$('.card[data-type="football"]').forEach(card=>{
@@ -796,7 +783,6 @@ function initDynamicTiles(){
     dynamicTimers[card.dataset.id] = timer;
   });
 }
-
 function initLiveFeeds(){
   // RSS (live)
   $$('.card[data-type="rss"]').forEach(card=>{
@@ -840,30 +826,33 @@ function renderTicker(card, prices, prev){
 }
 
 /* -----------------------------
-   Add Tile
+   Add Tile (intents + AI single-tile)
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
 const tileSearch = $("#tileSearch");
 
-addBtn?.addEventListener("click", () => {
-  tileMenu?.classList.toggle("hidden");
-  if (tileMenu && !tileMenu.classList.contains("hidden")) tileSearch?.focus();
+addBtn.addEventListener("click", () => {
+  tileMenu.classList.toggle("hidden");
+  if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
 });
 
-tileSearch?.addEventListener("keydown", (e)=>{
-  if (e.key !== "Enter") { if (e.key === "Escape") tileMenu?.classList.add("hidden"); return; }
+tileSearch.addEventListener("keydown", (e)=>{
+  if (e.key !== "Enter") {
+    if (e.key === "Escape") tileMenu.classList.add("hidden");
+    return;
+  }
+
   const valRaw = tileSearch.value.trim();
   if (!valRaw) return;
   const val = valRaw.replace(/\s+/g, " ");
   let newTile = null;
 
-  /* --- travel intent ---> Maps tile --- */
-  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break)/i;
+  /* 1) Travel intent → Maps (normalized) */
+  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|getaway|staycation|weekend)/i;
   const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
-
   if (TRAVEL_RE.test(val) || GEO_HINT.test(val)) {
-    const q = val.replace(/\bnear me\b/i, "near me");
+    const q = normalizeTravelQuery(val);
     newTile = {
       id: uid(),
       type: "maps",
@@ -873,7 +862,7 @@ tileSearch?.addEventListener("keydown", (e)=>{
     };
   }
 
-  /* Quick commands: "news topic" */
+  /* 2) Quick commands: news / topic */
   if (!newTile) {
     const mNews = val.match(/^news(?:\s+(.+))?$/i);
     if (mNews) {
@@ -888,126 +877,265 @@ tileSearch?.addEventListener("keydown", (e)=>{
     }
   }
 
-  // URL -> Web
+  /* 3) Football fixtures today */
+  if (!newTile && /(football|soccer).*(fixtures|today|scores)/i.test(val)) {
+    const fixUrl = "https://www.bbc.co.uk/sport/football/scores-fixtures";
+    const html = `
+      <div>
+        <div class="muted">Quick fixtures snapshot — open BBC for full details.</div>
+        <ul id="fx-quick" style="margin:8px 0 12px; display:grid; gap:6px;"></ul>
+        <div class="web-actions">
+          <button class="btn sm web-toggle" data-mode="embed">Embed</button>
+          <a class="btn sm" href="${fixUrl}" target="_blank" rel="noopener">Open</a>
+        </div>
+      </div>`;
+    newTile = { id: uid(), type: "web", title: "Football — Fixtures (Today)", meta:{ url: fixUrl, mode:"preview" }, content: html };
+    setTimeout(()=>{
+      const card = document.querySelector(`.card[data-id="${newTile.id}"]`);
+      const list = card?.querySelector('#fx-quick');
+      if (!list) return;
+      fetch(`/api/rss?url=${encodeURIComponent('https://feeds.bbci.co.uk/sport/football/rss.xml')}`)
+        .then(r=>r.json()).then(data=>{
+          const items = (data.items||[]).slice(0,5);
+          list.innerHTML = items.map(i=>`<li><a href="${i.link}" target="_blank" rel="noopener">${i.title}</a></li>`).join("");
+        })
+        .catch(()=>{ list.innerHTML = `<li class="muted">Open for full fixtures →</li>`; });
+    }, 80);
+  }
+
+  /* 4) YouTube */
+  if (!newTile) {
+    const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
+    if (ytUrl) {
+      const videoId = ytUrl[1];
+      const playlist = [videoId, ...YT_DEFAULTS.filter(x=>x!==videoId)].slice(0,4);
+      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:videoId}, content: ytPlaylistMarkup(playlist, videoId) };
+    } else if (/^youtube\s+/i.test(val)) {
+      const playlist = [...YT_DEFAULTS];
+      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
+    }
+  }
+
+  /* 5) Spotify */
+  if (!newTile && /spotify/i.test(val)) {
+    const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
+    newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
+  }
+
+  /* 6) Stocks */
+  if (!newTile && /stocks?|markets?/i.test(val)) {
+    const symbols = ["AAPL","MSFT","BTC-USD"];
+    newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
+  }
+
+  /* 7) Weather (stub) */
+  if (!newTile && /weather/i.test(val)) {
+    const html = `
+      <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
+      <div class="row" style="margin-top:8px">
+        <div>🌤️</div><div class="muted">Partly cloudy</div><div>18°C</div>
+      </div>`;
+    newTile = { id: uid(), type:"weather", title:"Weather", content: html };
+  }
+
+  /* 8) URL → Web */
   const isUrl = /^https?:\/\//i.test(val);
   if (!newTile && isUrl) {
     const url = val;
     newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
   }
 
-  // AI planner fallback → SINGLE tile
+  /* 9) Generic topic → AI plan (single tile) or RSS fallback */
   if (!newTile) {
-    fetch(`/api/ai-plan?q=${encodeURIComponent(val)}`)
-      .then(r=>r.json())
+    fetch(`/api/ai-plan?q=${encodeURIComponent(val)}`, { method:"GET" })
+      .then(r=>{ if (!r.ok) throw new Error("ai-plan not available"); return r.json(); })
       .then(plan=>{
-        const t = (plan.tiles||[])[0];
-        if (!t) throw new Error("no plan");
-        let tile = null;
-        if (t.type === "maps" && t.q)
-          tile = { id: uid(), type:"maps", title: t.title || `Search — ${t.q}`, meta:{ q: t.q }, content: mapsTileMarkup(t.q) };
-        else if (t.type === "rss" && t.feeds?.length)
-          tile = { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
-        else if (t.type === "web" && t.url)
-          tile = { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
-        else if (t.type === "youtube" && t.playlist?.length) {
+        let t = plan.tile || (Array.isArray(plan.tiles) ? plan.tiles[0] : null);
+        if (!t) throw new Error("empty ai plan");
+
+        let made = null;
+        if (t.type === "rss" && t.feeds?.length) {
+          made = { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
+        } else if (t.type === "web" && t.url) {
+          made = { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
+        } else if (t.type === "youtube" && t.playlist?.length) {
           const cur = t.playlist[0];
-          tile = { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
-        } else if (t.type === "gallery" && t.images?.length)
-          tile = { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
-        if (!tile) throw new Error("unsupported");
-        sections.unshift(tile);
+          made = { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
+        } else if (t.type === "stocks" && t.symbols?.length) {
+          made = { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
+        } else if (t.type === "gallery" && t.images?.length) {
+          made = { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
+        } else if (t.type === "maps" && t.q) {
+          const qn = normalizeTravelQuery(t.q);
+          made = { id: uid(), type:"maps", title: t.title || `Search — ${qn}`, meta:{ q: qn }, content: mapsTileMarkup(qn) };
+        }
+
+        if (!made) throw new Error("unsupported ai plan tile type");
+
+        sections.unshift(made);
         localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
         render();
+        tileMenu.classList.add("hidden");
+        tileSearch.value = "";
       })
       .catch(()=>{
-        // last resort → web search card
-        const url = `https://www.google.com/search?q=${encodeURIComponent(val)}`;
-        const title = "Search …";
-        const tile = { id: uid(), type:"web", title, meta:{ url, mode:"preview" }, content: webTileMarkup(url,"preview") };
-        sections.unshift(tile);
+        const gn  = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
+        const a = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
+        sections.unshift(a);
         localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
         render();
+        tileMenu.classList.add("hidden");
+        tileSearch.value = "";
       });
-    tileMenu?.classList.add("hidden");
-    tileSearch.value = "";
-    return;
+
+    return; // async path
   }
 
-  // we had a direct match above
+  // Persist & render for sync branches
   sections.unshift(newTile);
   localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
   render();
-  tileMenu?.classList.add("hidden");
+  tileMenu.classList.add("hidden");
   tileSearch.value = "";
 });
 
 /* -----------------------------
-   Modal helpers (simple)
+   Assistant Toggle & Chat  (standalone chat)
 ----------------------------- */
-let modalHost = document.getElementById("modalHost");
-if (!modalHost) {
-  modalHost = document.createElement("div");
-  modalHost.id = "modalHost";
-  document.body.appendChild(modalHost);
+const assistantToggle = $("#assistantToggle");
+const assistantPanel  = $("#assistantPanel");
+const chatLog   = $("#assistantChat");
+const chatForm  = $("#chatForm");
+const chatInput = $("#chatInput");
+
+function updateAssistant() {
+  assistantPanel.style.display = assistantOn ? "block" : "none";
+  assistantToggle?.classList.toggle("primary", assistantOn);
+  appEl.classList.toggle("no-right", !assistantOn);
+  localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
 }
-function __openModal(innerHTML){
-  modalHost.innerHTML = `
-    <div class="modal-backdrop"></div>
-    <div class="modal-sheet">${innerHTML}</div>
-  `;
-  modalHost.classList.add("show");
-  modalHost.querySelector(".modal-backdrop").addEventListener("click", __closeModal, { once:true });
+assistantToggle?.addEventListener("click", (e) => {
+  e.preventDefault();
+  assistantOn = !assistantOn;
+  updateAssistant();
+});
+
+function renderChat(){
+  if (!chatLog) return;
+  chatLog.innerHTML = "";
+  chat.forEach(m=>{
+    const d = document.createElement("div");
+    d.className = `msg ${m.role}`;
+    d.textContent = m.text;
+    chatLog.appendChild(d);
+  });
+  chatLog.scrollTop = chatLog.scrollHeight;
 }
-function __closeModal(){ modalHost.classList.remove("show"); modalHost.innerHTML = ""; }
+function addChat(role, text){
+  chat.push({role, text});
+  localStorage.setItem(K_CHAT, JSON.stringify(chat));
+  renderChat();
+}
+
+// Submit → /api/ai-chat (never add tiles)
+chatForm?.addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const text = chatInput.value.trim();
+  if (!text) return;
+  addChat('user', text);
+  chatInput.value = "";
+  try {
+    const r = await fetch(`/api/ai-chat?q=${encodeURIComponent(text)}`);
+    if (!r.ok) throw new Error("chat endpoint not available");
+    const j = await r.json();
+    addChat('ai', j.message || "…");
+  } catch {
+    addChat('ai', "I couldn't reach the chat service just now. Try again in a moment.");
+  }
+});
 
 /* -----------------------------
-   Assistant chat (standalone)
+   Global settings (Top button)
 ----------------------------- */
-const chatBox = document.getElementById("assistantInput");
-const chatSendBtn = document.getElementById("assistantSend");
-const chatPane = document.getElementById("assistantMessages");
+$("#globalSettingsBtn")?.addEventListener("click", ()=>{
+  const html = `
+    <div class="modal-card">
+      <h2>Global Settings</h2>
+      <div class="field">
+        <label>Theme</label>
+        <select class="input" id="g_theme">
+          <option value="solar" ${prefs.theme==='solar'?'selected':''}>Solar (Dark)</option>
+          <option value="ice" ${prefs.theme==='ice'?'selected':''}>Ice (Light)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Density</label>
+        <select class="input" id="g_density">
+          <option value="comfortable" ${prefs.density==='comfortable'?'selected':''}>Comfortable</option>
+          <option value="compact" ${prefs.density==='compact'?'selected':''}>Compact</option>
+        </select>
+      </div>
+      <div class="actions" style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn sm" data-action="cancel">Cancel</button>
+        <button class="btn sm" id="resetLayout">Reset Layout</button>
+        <button class="btn sm primary" data-action="save" id="g_save">Save</button>
+      </div>
+    </div>
+  `;
+  __openModal(html);
+  $("#g_save")?.addEventListener("click", ()=>{
+    const theme = $("#g_theme").value;
+    const density = $("#g_density").value;
+    prefs.theme = theme; prefs.density = density;
+    localStorage.setItem(K_PREFS, JSON.stringify(prefs));
+    document.body.classList.toggle('theme-ice', theme === 'ice');
+    document.body.classList.toggle('density-compact', density === 'compact');
+    __closeModal();
+  }, { once:true });
+  $("#resetLayout")?.addEventListener("click", ()=>{
+    localStorage.removeItem(K_SECTIONS);
+    localStorage.removeItem(K_VERSION);
+    navigator.serviceWorker?.getRegistrations?.().then(rs=>rs.forEach(r=>r.unregister()));
+    location.reload();
+  }, { once:true });
+});
 
-function appendChat(role, text){
-  if (!chatPane) return;
-  const bubble = document.createElement("div");
-  bubble.className = `msg ${role}`;
-  bubble.textContent = text;
-  chatPane.appendChild(bubble);
-  chatPane.scrollTop = chatPane.scrollHeight;
-}
-function gatherAssistantHistory(latestUserText){
-  const msgs = [{ role:"system", content:"You are a helpful assistant inside LifeCre8." }];
-  chatPane?.querySelectorAll(".msg").forEach(node=>{
-    const role = node.classList.contains("user") ? "user" : "assistant";
-    msgs.push({ role, content: node.textContent || "" });
+/* -----------------------------
+   Modal helpers
+----------------------------- */
+(function modalHelpers(){
+  const modal = document.getElementById('modal');
+  const backdrop = document.getElementById('fsBackdrop');
+
+  window.__openModal = window.__openModal || function(html){
+    if (!modal) return;
+    modal.innerHTML = html || modal.innerHTML;
+    modal.classList.remove('hidden');
+    modal.classList.add('show');
+    document.body.style.overflow = 'hidden';
+    backdrop?.classList.remove('show');
+  };
+  window.__closeModal = window.__closeModal || function(){
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.classList.remove('show');
+    modal.innerHTML = '';
+    document.body.style.overflow = '';
+    backdrop?.classList.remove('show');
+  };
+
+  modal?.addEventListener('click', (e)=>{
+    if (e.target === modal) window.__closeModal();
   });
-  if (latestUserText && (!msgs.length || msgs[msgs.length-1].role !== "user")) {
-    msgs.push({ role:"user", content: latestUserText });
-  }
-  return msgs;
-}
-async function assistantSend(){
-  const val = (chatBox?.value || "").trim();
-  if (!val) return;
-  appendChat("user", val);
-  chatBox.value = "";
-  appendChat("assistant", "…");
-  try {
-    const r = await fetch("/api/ai-chat", {
-      method: "POST",
-      headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ messages: gatherAssistantHistory(val) })
-    });
-    const { reply } = await r.json();
-    const last = chatPane?.querySelector(".msg.assistant:last-child");
-    if (last) last.textContent = reply || "(no reply)";
-  } catch {
-    const last = chatPane?.querySelector(".msg.assistant:last-child");
-    if (last) last.textContent = "Sorry — I hit an error replying.";
-  }
-}
-chatSendBtn?.addEventListener("click", assistantSend);
-chatBox?.addEventListener("keydown", (e)=>{ if (e.key === "Enter") assistantSend(); });
+  modal?.addEventListener('click', (e)=>{
+    const closeBtn = e.target.closest('[data-action="close"],[data-action="cancel"],[data-action="dismiss"]');
+    const saveBtn  = e.target.closest('[data-action="save"],[data-action="ok"],[data-action="apply"]');
+    if (closeBtn || saveBtn) window.__closeModal();
+  });
+  document.addEventListener('keydown', (e)=>{
+    if (e.key === 'Escape' && modal && !modal.classList.contains('hidden')) window.__closeModal();
+  });
+})();
 
 /* -----------------------------
    Init
@@ -1015,5 +1143,7 @@ chatBox?.addEventListener("keydown", (e)=>{ if (e.key === "Enter") assistantSend
 document.addEventListener("DOMContentLoaded", () => {
   $("#yr") && ($("#yr").textContent = new Date().getFullYear());
   ensureVersion();
+  updateAssistant();
+  renderChat();
   render();
 });
