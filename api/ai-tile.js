@@ -1,123 +1,164 @@
 // api/ai-tile.js
-/**
- * Multi-result AI tile endpoint
- * - Returns several high-quality link targets (no iframes)
- * - Adds travel helpers (Maps / Booking / Tripadvisor) for travel-ish queries
- * - Never fabricates sources; uses trusted query URLs
- *
- * Query:  /api/ai-tile?q=<string>&region=GB
- * Response:
- *  { title: string, items: [{kind,title,url,snippet?}] }
- */
+// Purpose: Given a free-form query, return ONE tile plan the client can render.
+// Supports: maps (travel intent), rss, web, youtube, gallery.
+// Uses demonym → country mapping & normalizes travel queries, mirroring client logic.
 
 export default async function handler(req, res) {
   try {
-    const q = String(req.query.q || "").trim();
-    const region = (req.query.region || "GB").toUpperCase();
+    const { q = "" } = req.query;
+    const query = String(q || "").trim();
+    if (!query) return res.status(400).json({ error: "missing q" });
 
-    if (!q) return res.status(400).json({ error: "Missing q" });
-
-    // Helpers
-    const enc = encodeURIComponent;
-    const gg = (s) =>
-      `https://www.google.com/search?q=${enc(s)}&hl=en-${region}&gl=${region}`;
-    const gnews = (s) =>
-      `https://news.google.com/search?q=${enc(s)}&hl=en-${region}&gl=${region}&ceid=${region}:en`;
-    const yt = (s) =>
-      `https://www.youtube.com/results?search_query=${enc(s)}`;
-    const maps = (s) => `https://www.google.com/maps/search/${enc(s)}`;
-    const wiki = (s) =>
-      `https://en.wikipedia.org/w/index.php?search=${enc(s)}`;
-
-    const looksTravel = /(hotel|resort|hostel|bnb|air\s*bnb|airbnb|spa|retreat|villa|lodg(e|ing)|guesthouse|inn|aparthotel|beach|city\s*break|holiday|holidays|staycation|getaway|wellness|yoga|near me|in\s+[A-Za-z][\w\s'-]+)$/i.test(
-      q
-    );
-
-    const items = [
-      {
-        kind: "search",
-        title: "Top results on Google",
-        url: gg(q),
-        snippet: "Open a full web search for broader coverage.",
-      },
-      {
-        kind: "article",
-        title: "News coverage (Google News)",
-        url: gnews(q),
-        snippet: "Recent and reputable news sources about this topic.",
-      },
-      {
-        kind: "video",
-        title: "Watch on YouTube",
-        url: yt(q),
-        snippet: "Tutorials, walkthroughs, explainers, and reviews.",
-      },
-      {
-        kind: "site",
-        title: "Wikipedia overview",
-        url: wiki(q),
-        snippet: "Neutral overview and key facts, when available.",
-      },
-    ];
-
-    if (looksTravel) {
-      const normQ = normalizeTravelQuery(q);
-      items.unshift({
-        kind: "map",
-        title: `View on Google Maps — ${normQ}`,
-        url: maps(normQ),
-        snippet: "Explore places, ratings, and routes on the map.",
-      });
-      items.push(
-        {
-          kind: "site",
-          title: "Booking.com",
-          url: `https://www.booking.com/searchresults.html?ss=${enc(normQ)}`,
-          snippet: "Hotels and stays (filters, prices, availability).",
-        },
-        {
-          kind: "site",
-          title: "Tripadvisor",
-          url: `https://www.tripadvisor.com/Search?q=${enc(normQ)}`,
-          snippet: "Reviews, rankings, attractions, food & activities.",
-        }
-      );
+    // 1) Travel intent (server-side mirror)
+    const DEMONYMS = {
+      "british":"United Kingdom","english":"England","scottish":"Scotland","welsh":"Wales","irish":"Ireland",
+      "french":"France","spanish":"Spain","italian":"Italy","german":"Germany","portuguese":"Portugal",
+      "thai":"Thailand","greek":"Greece","turkish":"Turkey","dutch":"Netherlands","swiss":"Switzerland",
+      "austrian":"Austria","norwegian":"Norway","swedish":"Sweden","danish":"Denmark","finnish":"Finland",
+      "icelandic":"Iceland","moroccan":"Morocco","egyptian":"Egypt","japanese":"Japan","korean":"Korea",
+      "vietnamese":"Vietnam","indonesian":"Indonesia","malaysian":"Malaysia","australian":"Australia",
+      "new zealand":"New Zealand","polish":"Poland","czech":"Czechia","hungarian":"Hungary","croatian":"Croatia",
+      "canadian":"Canada","american":"United States","chilean":"Chile","argentinian":"Argentina","brazilian":"Brazil"
+    };
+    function demonymToCountry(text){
+      const l = text.toLowerCase();
+      const keys = Object.keys(DEMONYMS).sort((a,b)=>b.length-a.length);
+      for (const k of keys) if (l.includes(k)) return DEMONYMS[k];
+      return null;
+    }
+    function normalizeTravelQuery(val){
+      const raw = (val || "").trim();
+      if (!raw) return raw;
+      if (/\bnear me\b/i.test(raw)) return raw;
+      if (/\b(in|near|around)\s+[A-Za-z][\w\s'-]+$/i.test(raw)) return raw;
+      if (/\b(uk|u\.k\.|united kingdom|england|scotland|wales|northern ireland)\b/i.test(raw) && !/united kingdom/i.test(raw)) {
+        return `${raw} United Kingdom`;
+      }
+      const c = demonymToCountry(raw);
+      if (c && !new RegExp(c, "i").test(raw)) return `${raw} ${c}`;
+      if (/\b(holiday|holidays|break|breaks|trip|trips|ideas|getaway|getaways|staycation|weekend)\b/i.test(raw)) {
+        return `${raw} United Kingdom`;
+      }
+      return raw;
     }
 
-    return res.status(200).json({
-      title: `Results — ${q}`,
-      items,
+    const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|getaway|staycation|weekend|canal\s*boat|river\s*cruise|self\s*catering|villas?)/i;
+    const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
+
+    if (TRAVEL_RE.test(query) || GEO_HINT.test(query) || demonymToCountry(query)) {
+      const qn = normalizeTravelQuery(query);
+      return res.status(200).json({
+        type: "maps",
+        title: `Search — ${query}`,
+        q: qn
+      });
+    }
+
+    // 2) Heuristics before LLM: YouTube links
+    const yt = query.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
+    if (yt) {
+      const id = yt[1];
+      return res.status(200).json({
+        type: "youtube",
+        title: "YouTube",
+        playlist: [id]
+      });
+    }
+
+    // 3) URL → Web
+    if (/^https?:\/\//i.test(query)) {
+      return res.status(200).json({
+        type: "web",
+        title: "Web",
+        url: query
+      });
+    }
+
+    // 4) Ask OpenAI to design ONE tile plan
+    const key = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
+    if (!key) {
+      // graceful fallback → RSS for topic
+      return res.status(200).json({
+        type: "rss",
+        title: `Daily Brief — ${query}`,
+        feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-GB&gl=GB&ceid=GB:en`]
+      });
+    }
+
+    // Small, deterministic prompt to keep responses consistent
+    const system = [
+      "You are a tile planner for a dashboard.",
+      "Given a user query, output exactly ONE tile plan as strict JSON.",
+      "Types allowed: maps(web search phrase), web(url), rss([feedUrls]), youtube([videoIds]), gallery([imageUrls]).",
+      "Prefer maps for travel/lodging/places. Prefer rss for topical newsy themes.",
+      "Never output markdown. Only raw JSON."
+    ].join(" ");
+
+    const user = JSON.stringify({
+      query,
+      examples: [
+        { q: "thai beachfront holiday villas", plan: { type:"maps", q:"thai beachfront holiday villas Thailand" } },
+        { q: "chocolate cake recipes", plan: { type:"web", url:"https://www.seriouseats.com/chocolate-cake-recipes" } },
+        { q: "football fixtures today", plan: { type:"rss", feeds:["https://feeds.bbci.co.uk/sport/football/rss.xml"] } }
+      ]
     });
+
+    // Use OpenAI responses API (compatible fetch)
+    const resp = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: { "Content-Type":"application/json", "Authorization":`Bearer ${key}` },
+      body: JSON.stringify({
+        model: "gpt-4.1-mini",
+        input: [{ role:"system", content:system }, { role:"user", content:user }],
+        max_output_tokens: 400,
+        temperature: 0.2
+      })
+    });
+
+    if (!resp.ok) {
+      // fallback to topic RSS
+      return res.status(200).json({
+        type: "rss",
+        title: `Daily Brief — ${query}`,
+        feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-GB&gl=GB&ceid=GB:en`]
+      });
+    }
+
+    const data = await resp.json();
+    // Attempt to parse JSON from output_text
+    const raw = data?.output_text || "";
+    let plan = null;
+    try {
+      plan = JSON.parse(raw);
+    } catch {
+      // loose regex for JSON object
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (m) { try { plan = JSON.parse(m[0]); } catch {} }
+    }
+
+    if (!plan || typeof plan !== "object") {
+      return res.status(200).json({
+        type: "rss",
+        title: `Daily Brief — ${query}`,
+        feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-GB&gl=GB&ceid=GB:en`]
+      });
+    }
+
+    // Normalize maps q with demonyms if present
+    if (plan.type === "maps" && plan.q) {
+      plan.q = normalizeTravelQuery(plan.q);
+    } else if (plan.type === "maps" && !plan.q) {
+      plan.q = normalizeTravelQuery(query);
+    }
+
+    return res.status(200).json(plan);
   } catch (err) {
-    console.error("[ai-tile] error:", err);
-    return res.status(500).json({ error: "ai-tile failed" });
+    // Last-resort fallback → topic RSS
+    const q = String(req.query?.q || "").trim() || "news";
+    return res.status(200).json({
+      type: "rss",
+      title: `Daily Brief — ${q}`,
+      feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`]
+    });
   }
-}
-
-/* ---------- Travel query normalization (server copy) ---------- */
-function normalizeTravelQuery(val) {
-  const raw = (val || "").trim();
-  if (!raw) return raw;
-  if (/\bnear me\b/i.test(raw)) return raw;
-
-  // If the query explicitly mentions ANY non-UK country, don't change it.
-  const NON_UK_COUNTRIES =
-    /\b(france|spain|italy|germany|portugal|switzerland|austria|greece|croatia|turkey|netherlands|belgium|ireland(?!\s*northern)|iceland|norway|sweden|denmark|finland|poland|czech|hungary|romania|bulgaria|slovenia|slovakia|estonia|latvia|lithuania|canada|mexico|united states|usa|brazil|argentina|chile|peru|japan|south korea|korea|china|india|thailand|vietnam|indonesia|malaysia|singapore|australia|new zealand|morocco|egypt|south africa|uae|dubai|qatar)\b/i;
-  if (NON_UK_COUNTRIES.test(raw)) return raw;
-
-  const ukWords =
-    /\b(uk|u\.k\.|united kingdom|england|scotland|wales|northern ireland)\b/i;
-  const hasPlaceHint = /\b(in|near|around)\s+[A-Za-z][\w\s'-]+$/i.test(raw);
-  const isVeryGeneric =
-    /\b(holiday|holidays|break|breaks|trip|trips|ideas|getaway|getaways|staycation|weekend)\b/i.test(
-      raw
-    );
-
-  if (ukWords.test(raw)) {
-    return /united kingdom/i.test(raw) ? raw : `${raw} United Kingdom`;
-  }
-  if (!hasPlaceHint && isVeryGeneric) {
-    return `${raw} United Kingdom`;
-  }
-  return raw;
 }
