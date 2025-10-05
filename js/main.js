@@ -1,10 +1,11 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.10.8
-   Built on: v1.10.7
+   LifeCre8 — main.js  v1.10.9
+   Built on: v1.10.8
    What's new:
-   - FIX (Safari): avoid assignment on optional-chained target
-     when setting footer year label.
-   - Everything else unchanged from v1.10.7.
+   - Assistant: POST chat history to /api/ai-chat (stateful replies)
+   - Travel intent: include 'safari' and demonyms ('south african'→'South Africa', etc.)
+   - Maps hinting: if a query looks like only a place, add 'holiday ideas'
+   - Web tiles: removed 'Embed' toggle (Open only)
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -108,7 +109,7 @@ function ytPlaylistMarkup(playlist, currentId) {
 }
 
 /* -----------------------------
-   Web tile (simplified — no Embed toggle)
+   Web tile (no embed toggle)
 ----------------------------- */
 function webTileMarkup(url) {
   const host = hostOf(url);
@@ -161,31 +162,53 @@ const DEMONYMS = {
   "icelandic":"Iceland","moroccan":"Morocco","egyptian":"Egypt","japanese":"Japan","korean":"Korea",
   "vietnamese":"Vietnam","indonesian":"Indonesia","malaysian":"Malaysia","australian":"Australia",
   "new zealand":"New Zealand","polish":"Poland","czech":"Czechia","hungarian":"Hungary","croatian":"Croatia",
-  "canadian":"Canada","american":"United States","chilean":"Chile","argentinian":"Argentina","brazilian":"Brazil"
+  "canadian":"Canada","american":"United States","chilean":"Chile","argentinian":"Argentina","brazilian":"Brazil",
+  "south african":"South Africa"
 };
 
 function demonymToCountry(text){
   const l = text.toLowerCase();
+  // longest first so "south african" wins over "african"
   for (const k of Object.keys(DEMONYMS).sort((a,b)=>b.length-a.length)) {
     if (l.includes(k)) return DEMONYMS[k];
   }
   return null;
 }
 
+function isLikelyJustAPlace(text){
+  // Examples: “Argentina”, “French Riviera”, “Chiang Mai”
+  const words = text.trim().split(/\s+/);
+  return /^[a-z0-9\s'.,-]+$/i.test(text) && words.length <= 3;
+}
+
 function normalizeTravelQuery(val){
   const raw = (val || "").trim();
   if (!raw) return raw;
   if (/\bnear me\b/i.test(raw)) return raw;
-  if (/\b(in|near|around)\s+[A-Za-z][\w\s'-]+$/i.test(raw)) return raw;
-  if (/\b(uk|u\.k\.|united kingdom|england|scotland|wales|northern ireland)\b/i.test(raw) && !/united kingdom/i.test(raw)) {
-    return `${raw} United Kingdom`;
-  }
+
+  let out = raw;
+
+  // add country from demonym if not already present
   const country = demonymToCountry(raw);
-  if (country && !new RegExp(country, "i").test(raw)) return `${raw} ${country}`;
-  if (/\b(holiday|holidays|break|breaks|trip|trips|ideas|getaway|getaways|staycation|weekend)\b/i.test(raw)) {
-    return `${raw} United Kingdom`;
+  if (country && !new RegExp(`\\b${country}\\b`, "i").test(out)) {
+    out = `${out} ${country}`;
   }
-  return raw;
+
+  // if it's very generic like “holiday ideas” without a place,
+  // default to UK to avoid a world map view
+  const hasPlaceHint = /\b(in|near|around)\s+[A-Za-z][\w\s'-]+$/i.test(out);
+  const isVeryGeneric = /\b(holiday|holidays|break|breaks|trip|trips|ideas|getaway|getaways|staycation|weekend|resort|hotel|safari)\b/i.test(out);
+  const mentionsUK = /\b(united kingdom|england|scotland|wales|northern ireland|uk)\b/i.test(out);
+  if (!hasPlaceHint && isVeryGeneric && !mentionsUK && !country) {
+    out = `${out} United Kingdom`;
+  }
+
+  // If it looks like only a place name, append a helpful hint
+  if (isLikelyJustAPlace(out) && !/\b(holiday|trip|ideas|things to do|attractions|resort|hotel|safari|villa|beach)\b/i.test(out)) {
+    out = `${out} holiday ideas`;
+  }
+
+  return out;
 }
 
 /* -----------------------------
@@ -422,6 +445,7 @@ function render() {
   stopLiveIntervals();
 
   const grid = $("#grid");
+  if (!grid) return;
   grid.innerHTML = "";
 
   const others = sections.filter(s=>s.type!=="email");
@@ -451,6 +475,7 @@ function render() {
 ----------------------------- */
 (function attachDelegatesOnce(){
   const grid = $("#grid");
+  if (!grid) return;
 
   // Expand / Collapse
   grid.addEventListener("click", (e)=>{
@@ -488,7 +513,7 @@ function render() {
     render();
   });
 
-  // Settings
+  // Settings (per tile)
   grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".settingsBtn");
     if (!btn) return;
@@ -503,24 +528,21 @@ function render() {
         <div class="field">
           <label>URL</label>
           <input class="input" id="set_url" value="${url}">
-        </div>
-      `;
+        </div>`;
     } else if (s.type === "maps") {
       const q = s.meta?.q || "";
       fields = `
         <div class="field">
           <label>Maps search</label>
           <input class="input" id="set_maps_q" value="${q}">
-        </div>
-      `;
+        </div>`;
     } else if (s.type === "youtube") {
       const list = (s.meta?.playlist || YT_DEFAULTS).join(",");
       fields = `
         <div class="field">
           <label>Playlist (comma-separated video IDs)</label>
           <input class="input" id="set_playlist" value="${list}">
-        </div>
-      `;
+        </div>`;
     } else if (s.type === "stocks") {
       const syms = (s.meta?.symbols || ["AAPL","MSFT","BTC-USD"]).join(",");
       const presetOptions = Object.keys(STOCK_PRESETS).map(name=>`<option value="${name}">${name}</option>`).join("");
@@ -538,8 +560,7 @@ function render() {
             </select>
             <button class="btn sm" id="apply_symbols_preset" type="button">Apply</button>
           </div>
-        </div>
-      `;
+        </div>`;
     } else if (s.type === "rss") {
       const feeds = (s.meta?.feeds || RSS_PRESETS.uk).join(",");
       const presetOptions = Object.keys(RSS_PRESETS).map(key=>`<option value="${key}">${key.toUpperCase()}</option>`).join("");
@@ -557,8 +578,7 @@ function render() {
             </select>
             <button class="btn sm" id="apply_feeds_preset" type="button">Apply</button>
           </div>
-        </div>
-      `;
+        </div>`;
     } else {
       fields = `<div class="muted">No settings for this tile.</div>`;
     }
@@ -571,8 +591,7 @@ function render() {
           <button class="btn sm" data-action="cancel">Cancel</button>
           <button class="btn sm primary" data-action="save" id="settingsSaveBtn">Save</button>
         </div>
-      </div>
-    `;
+      </div>`;
     __openModal(html);
 
     $("#apply_symbols_preset")?.addEventListener("click", ()=>{
@@ -762,13 +781,12 @@ function initDynamicTiles(){
   });
 }
 function initLiveFeeds(){
-  // RSS (live; also first render)
+  // RSS (live)
   $$('.card[data-type="rss"]').forEach(card=>{
     const id = card.dataset.id;
     const s = sections.find(x=>x.id===id);
     const feeds = s?.meta?.feeds || RSS_PRESETS.uk;
     loadRssInto(card, feeds);
-    if (liveIntervals[id+"_rss"]) clearInterval(liveIntervals[id+"_rss"]);
     liveIntervals[id+"_rss"] = setInterval(()=>loadRssInto(card, feeds), 15*60*1000);
   });
 
@@ -780,7 +798,6 @@ function initLiveFeeds(){
     const syms = (ticker.dataset.symbols || "").split(",").map(s=>s.trim()).filter(Boolean);
     const refresh = () => loadQuotesInto(card, syms);
     refresh();
-    if (liveIntervals[id+"_quotes"]) clearInterval(liveIntervals[id+"_quotes"]);
     liveIntervals[id+"_quotes"] = setInterval(refresh, 30*1000);
   });
 }
@@ -806,20 +823,20 @@ function renderTicker(card, prices, prev){
 }
 
 /* -----------------------------
-   Add Tile (mini AI assistant)
+   Add Tile (intents + fallbacks)
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
 const tileSearch = $("#tileSearch");
 
-addBtn.addEventListener("click", () => {
-  tileMenu.classList.toggle("hidden");
-  if (!tileMenu.classList.contains("hidden")) tileSearch.focus();
+addBtn?.addEventListener("click", () => {
+  tileMenu?.classList.toggle("hidden");
+  if (tileMenu && !tileMenu.classList.contains("hidden")) tileSearch?.focus();
 });
 
-tileSearch.addEventListener("keydown", (e)=>{
+tileSearch?.addEventListener("keydown", (e)=>{
   if (e.key !== "Enter") {
-    if (e.key === "Escape") tileMenu.classList.add("hidden");
+    if (e.key === "Escape") tileMenu?.classList.add("hidden");
     return;
   }
 
@@ -828,9 +845,9 @@ tileSearch.addEventListener("keydown", (e)=>{
   const val = valRaw.replace(/\s+/g, " ");
   let newTile = null;
 
-  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|getaway|staycation|weekend|canal\s*boat|river\s*cruise|self\s*catering|villas?)/i;
+  /* 1) Travel intent → Maps (normalized + demonyms + safari) */
+  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|getaway|staycation|weekend|safari)/i;
   const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
-
   if (TRAVEL_RE.test(val) || GEO_HINT.test(val) || demonymToCountry(val)) {
     const q = normalizeTravelQuery(val);
     newTile = {
@@ -842,6 +859,7 @@ tileSearch.addEventListener("keydown", (e)=>{
     };
   }
 
+  /* 2) Quick News: "news" / "news <topic>" */
   if (!newTile) {
     const mNews = val.match(/^news(?:\s+(.+))?$/i);
     if (mNews) {
@@ -856,71 +874,54 @@ tileSearch.addEventListener("keydown", (e)=>{
     }
   }
 
+  /* 3) YouTube direct / command */
   if (!newTile) {
     const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
     if (ytUrl) {
       const videoId = ytUrl[1];
       const playlist = [videoId, ...YT_DEFAULTS.filter(x=>x!==videoId)].slice(0,4);
       newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:videoId}, content: ytPlaylistMarkup(playlist, videoId) };
+    } else if (/^youtube\s+/i.test(val)) {
+      const playlist = [...YT_DEFAULTS];
+      newTile = { id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) };
     }
   }
 
+  /* 4) Spotify */
+  if (!newTile && /spotify/i.test(val)) {
+    const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
+    newTile = { id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) };
+  }
+
+  /* 5) Stocks */
+  if (!newTile && /stocks?|markets?/i.test(val)) {
+    const symbols = ["AAPL","MSFT","BTC-USD"];
+    newTile = { id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) };
+  }
+
+  /* 6) URL → Web */
   const isUrl = /^https?:\/\//i.test(val);
   if (!newTile && isUrl) {
     const url = val;
     newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url }, content: webTileMarkup(url) };
   }
 
+  /* 7) Topic → RSS fallback */
   if (!newTile) {
-    fetch(`/api/ai-tile?q=${encodeURIComponent(val)}`, { method:"GET" })
-      .then(r=>{ if (!r.ok) throw new Error("ai-tile not available"); return r.json(); })
-      .then(t=>{
-        let made = null;
-        if (t.type === "rss" && t.feeds?.length) {
-          made = { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
-        } else if (t.type === "web" && t.url) {
-          made = { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url }, content: webTileMarkup(t.url) };
-        } else if (t.type === "youtube" && t.playlist?.length) {
-          const cur = t.playlist[0];
-          made = { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
-        } else if (t.type === "gallery" && t.images?.length) {
-          made = { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
-        } else if (t.type === "maps" && t.q) {
-          const qn = normalizeTravelQuery(t.q);
-          made = { id: uid(), type:"maps", title: t.title || `Search — ${qn}`, meta:{ q: qn }, content: mapsTileMarkup(qn) };
-        } else {
-          const gn  = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
-          made = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
-        }
-
-        sections.unshift(made);
-        localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-        render();
-        tileMenu.classList.add("hidden");
-        tileSearch.value = "";
-      })
-      .catch(()=>{
-        const gn  = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
-        const a = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
-        sections.unshift(a);
-        localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-        render();
-        tileMenu.classList.add("hidden");
-        tileSearch.value = "";
-      });
-
-    return;
+    const gn  = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
+    newTile = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
   }
 
+  // Persist & render
   sections.unshift(newTile);
   localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
   render();
-  tileMenu.classList.add("hidden");
+  tileMenu?.classList.add("hidden");
   tileSearch.value = "";
 });
 
 /* -----------------------------
-   Assistant Toggle & Chat  (standalone chat)
+   Assistant Toggle & Chat (stateful)
 ----------------------------- */
 const assistantToggle = $("#assistantToggle");
 const assistantPanel  = $("#assistantPanel");
@@ -929,9 +930,10 @@ const chatForm  = $("#chatForm");
 const chatInput = $("#chatInput");
 
 function updateAssistant() {
+  if (!assistantPanel) return;
   assistantPanel.style.display = assistantOn ? "block" : "none";
   assistantToggle?.classList.toggle("primary", assistantOn);
-  appEl.classList.toggle("no-right", !assistantOn);
+  appEl?.classList.toggle("no-right", !assistantOn);
   localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
 }
 assistantToggle?.addEventListener("click", (e) => {
@@ -957,6 +959,7 @@ function addChat(role, text){
   renderChat();
 }
 
+// Submit → POST /api/ai-chat with history
 chatForm?.addEventListener("submit", async (e)=>{
   e.preventDefault();
   const text = chatInput.value.trim();
@@ -964,9 +967,12 @@ chatForm?.addEventListener("submit", async (e)=>{
   addChat('user', text);
   chatInput.value = "";
   try {
-    const r = await fetch(`/api/ai-chat?q=${encodeURIComponent(text)}`);
-    if (!r.ok) throw new Error("chat endpoint not available");
-    const j = await r.json();
+    const r = await fetch(`/api/ai-chat`, {
+      method: "POST",
+      headers: { "Content-Type":"application/json" },
+      body: JSON.stringify({ q: text, messages: chat })
+    });
+    const j = await r.json().catch(()=>({ message:"…" }));
     addChat('ai', j.message || "…");
   } catch (err) {
     addChat('ai', "I couldn't reach the chat service just now. Try again in a moment.");
@@ -999,8 +1005,7 @@ $("#globalSettingsBtn")?.addEventListener("click", ()=>{
         <button class="btn sm" id="resetLayout">Reset Layout</button>
         <button class="btn sm primary" data-action="save" id="g_save">Save</button>
       </div>
-    </div>
-  `;
+    </div>`;
   __openModal(html);
   $("#g_save")?.addEventListener("click", ()=>{
     const theme = $("#g_theme").value;
@@ -1020,7 +1025,7 @@ $("#globalSettingsBtn")?.addEventListener("click", ()=>{
 });
 
 /* -----------------------------
-   Modal helpers
+   Modal open/close helpers
 ----------------------------- */
 (function modalSafetyNet(){
   const modal = document.getElementById('modal');
@@ -1065,11 +1070,9 @@ $("#globalSettingsBtn")?.addEventListener("click", ()=>{
    Init
 ----------------------------- */
 document.addEventListener("DOMContentLoaded", () => {
-  const yrEl = $("#yr");               // <-- FIX: no optional-chaining assignment
-  if (yrEl) yrEl.textContent = new Date().getFullYear();
-
+  $("#yr") && ($("#yr").textContent = new Date().getFullYear());
   ensureVersion();
-  updateAssistant();
-  renderChat();
+  updateAssistant();   // uses K_ASSIST_ON state
+  renderChat();        // renders existing chat log
   render();
 });
