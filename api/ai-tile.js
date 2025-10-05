@@ -1,23 +1,13 @@
 // api/ai-tile.js
 /**
  * Multi-result AI tile endpoint
- * - Always returns several high-quality link targets (no iframes by default)
- * - Adds travel helpers (Maps / Booking / Tripadvisor) when query looks travel-y
+ * - Returns several high-quality link targets (no iframes)
+ * - Adds travel helpers (Maps / Booking / Tripadvisor) for travel-ish queries
  * - Never fabricates sources; uses trusted query URLs
  *
- * Query:  /api/ai-tile?q=<string>
- * Optional: &region=GB (affects Google/YouTube params a bit)
- *
- * Response shape:
- *  {
- *    title: string,
- *    items: Array<{
- *      kind: 'article'|'video'|'map'|'search'|'site',
- *      title: string,
- *      url: string,
- *      snippet?: string
- *    }>
- *  }
+ * Query:  /api/ai-tile?q=<string>&region=GB
+ * Response:
+ *  { title: string, items: [{kind,title,url,snippet?}] }
  */
 
 export default async function handler(req, res) {
@@ -25,9 +15,7 @@ export default async function handler(req, res) {
     const q = String(req.query.q || "").trim();
     const region = (req.query.region || "GB").toUpperCase();
 
-    if (!q) {
-      return res.status(400).json({ error: "Missing q" });
-    }
+    if (!q) return res.status(400).json({ error: "Missing q" });
 
     // Helpers
     const enc = encodeURIComponent;
@@ -45,7 +33,6 @@ export default async function handler(req, res) {
       q
     );
 
-    // Always offer a few “best bets” links (no fabrications)
     const items = [
       {
         kind: "search",
@@ -107,11 +94,16 @@ export default async function handler(req, res) {
   }
 }
 
-// Shared with client (keep in sync with main.js)
+/* ---------- Travel query normalization (server copy) ---------- */
 function normalizeTravelQuery(val) {
   const raw = (val || "").trim();
   if (!raw) return raw;
   if (/\bnear me\b/i.test(raw)) return raw;
+
+  // If the query explicitly mentions ANY non-UK country, don't change it.
+  const NON_UK_COUNTRIES =
+    /\b(france|spain|italy|germany|portugal|switzerland|austria|greece|croatia|turkey|netherlands|belgium|ireland(?!\s*northern)|iceland|norway|sweden|denmark|finland|poland|czech|hungary|romania|bulgaria|slovenia|slovakia|estonia|latvia|lithuania|canada|mexico|united states|usa|brazil|argentina|chile|peru|japan|south korea|korea|china|india|thailand|vietnam|indonesia|malaysia|singapore|australia|new zealand|morocco|egypt|south africa|uae|dubai|qatar)\b/i;
+  if (NON_UK_COUNTRIES.test(raw)) return raw;
 
   const ukWords =
     /\b(uk|u\.k\.|united kingdom|england|scotland|wales|northern ireland)\b/i;

@@ -1,13 +1,10 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.10.2
-   Built on: v1.10.1 (your stable)
+   LifeCre8 — main.js  v1.10.3
+   Built on: v1.10.2
 
    What's new:
-   - Add-Tile now calls /api/ai-tile for general queries
-     → returns a *multi-result* tile with clean link cards
-     → no iframes by default (optional per-link Embed)
-   - Travel intent still normalizes "UK holiday ideas" etc.
-   - Assistant chat remains standalone via /api/ai-chat
+   - Results tile: removed per-link "Embed" + iframes (cleaner)
+   - Travel normalization: respects explicit non-UK countries
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -16,7 +13,7 @@ const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
 const K_PREFS      = "lifecre8.prefs";
-const DATA_VERSION = 6;
+const DATA_VERSION = 7;
 
 /* ===== Presets ===== */
 const RSS_PRESETS = {
@@ -82,11 +79,9 @@ if (!fsBackdrop) {
 }
 
 /* -----------------------------
-   YouTube helpers (unchanged)
+   YouTube helpers
 ----------------------------- */
-const YT_DEFAULTS = [
-  "M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk",
-];
+const YT_DEFAULTS = ["M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk"];
 const ytEmbedSrc = (id) => `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
 function ytPlaylistMarkup(playlist, currentId) {
   const ids = (playlist && playlist.length) ? playlist : YT_DEFAULTS;
@@ -153,15 +148,15 @@ function webTileMarkup(url, mode = "preview") {
 }
 
 /* -----------------------------
-   Clean multi-result tile (new)
+   Results tile (clean link cards, no embeds)
 ----------------------------- */
 function resultsTileMarkup(q, items) {
-  const list = (items || []).map((it, idx) => {
+  const list = (items || []).map((it) => {
     const host = hostOf(it.url);
     const fav  = favOf(it.url);
     const type = (it.kind || "link").toUpperCase();
     return `
-      <div class="result" data-index="${idx}">
+      <div class="result">
         <div class="row" style="gap:10px;align-items:flex-start">
           <img class="favicon" src="${fav}" alt="">
           <div class="grow">
@@ -169,10 +164,6 @@ function resultsTileMarkup(q, items) {
             ${it.snippet ? `<div class="muted">${it.snippet}</div>` : ""}
             <div class="muted" style="font-size:12px;margin-top:4px">${type} — ${host}</div>
           </div>
-          <button class="btn xs embed-link" data-url="${it.url}">Embed</button>
-        </div>
-        <div class="embed-wrap hidden">
-          <iframe src="${it.url}" loading="lazy"></iframe>
         </div>
       </div>
     `;
@@ -180,9 +171,6 @@ function resultsTileMarkup(q, items) {
 
   return `
     <div class="results-tile" data-results data-q="${encodeURIComponent(q)}">
-      <div class="results-controls">
-        <button class="btn sm collapse-all">Collapse embeds</button>
-      </div>
       <div class="results-list">
         ${list || `<div class="muted">No suggestions yet.</div>`}
       </div>
@@ -210,11 +198,16 @@ function mapsTileMarkup(query){
   `;
 }
 
-/* ---- Travel query normalization (shared with API) ---- */
+/* ---- Travel query normalization (client copy) ---- */
 function normalizeTravelQuery(val){
   const raw = (val || "").trim();
   if (!raw) return raw;
   if (/\bnear me\b/i.test(raw)) return raw;
+
+  // If any non-UK country is explicitly mentioned, don't alter it.
+  const NON_UK_COUNTRIES =
+    /\b(france|spain|italy|germany|portugal|switzerland|austria|greece|croatia|turkey|netherlands|belgium|ireland(?!\s*northern)|iceland|norway|sweden|denmark|finland|poland|czech|hungary|romania|bulgaria|slovenia|slovakia|estonia|latvia|lithuania|canada|mexico|united states|usa|brazil|argentina|chile|peru|japan|south korea|korea|china|india|thailand|vietnam|indonesia|malaysia|singapore|australia|new zealand|morocco|egypt|south africa|uae|dubai|qatar)\b/i;
+  if (NON_UK_COUNTRIES.test(raw)) return raw;
 
   const ukWords = /\b(uk|u\.k\.|united kingdom|england|scotland|wales|northern ireland)\b/i;
   const hasPlaceHint = /\b(in|near|around)\s+[A-Za-z][\w\s'-]+$/i.test(raw);
@@ -230,7 +223,7 @@ function normalizeTravelQuery(val){
 }
 
 /* -----------------------------
-   RSS tile (unchanged rendering)
+   RSS / Gallery / Markets (unchanged)
 ----------------------------- */
 function rssListMarkup(items) {
   const list = (items || []).map(i => `
@@ -285,9 +278,6 @@ function loadRssInto(card, feeds, attempt=1) {
     });
 }
 
-/* -----------------------------
-   Gallery
------------------------------ */
 function galleryMarkup(urls) {
   const imgs = (urls || []).map(u => `<img src="${u}" alt="">`).join("");
   return `
@@ -298,9 +288,6 @@ function galleryMarkup(urls) {
   `;
 }
 
-/* -----------------------------
-   Markets
------------------------------ */
 function tickerMarkup(symbols) {
   const rows = symbols.map(sym => `
     <div class="trow" data-sym="${sym}">
@@ -344,7 +331,7 @@ function loadQuotesInto(card, symbols) {
 }
 
 /* -----------------------------
-   Football (simulated fallback)
+   Football (sim fallback)
 ----------------------------- */
 function footballMarkupSeed() {
   const matches = [
@@ -430,13 +417,8 @@ function tileContentFor(section) {
       const src = url.replace("open.spotify.com/", "open.spotify.com/embed/");
       return `<iframe style="border-radius:12px" src="${src}" width="100%" height="232" frameborder="0" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"></iframe>`;
     }
-    case "rss": {
-      return section.content || rssLoadingMarkup();
-    }
-    case "gallery": {
-      const urls = section.meta?.urls || [];
-      return galleryMarkup(urls);
-    }
+    case "rss": return section.content || rssLoadingMarkup();
+    case "gallery": return galleryMarkup(section.meta?.urls || []);
     case "stocks": return section.content;
     case "football": return section.content;
     default: return section.content || "Empty tile";
@@ -522,7 +504,7 @@ function render() {
     render();
   });
 
-  // Settings (generic small panels for supported tiles)
+  // Settings
   grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".settingsBtn");
     if (!btn) return;
@@ -562,7 +544,7 @@ function render() {
           <label>Query</label>
           <input class="input" id="set_results_q" value="${q}">
         </div>
-        <div class="muted">This tile lists multiple results with optional per-link embeds.</div>
+        <div class="muted">This tile lists multiple high-quality links.</div>
       `;
     } else {
       fields = `<div class="muted">No settings for this tile.</div>`;
@@ -637,22 +619,6 @@ function render() {
     if (!s) return;
     const feeds = s.meta?.feeds || RSS_PRESETS.uk;
     loadRssInto(card, feeds);
-  });
-
-  // Results tile: per-link Embed and Collapse
-  grid.addEventListener("click", (e)=>{
-    const btn = e.target.closest(".embed-link");
-    if (btn) {
-      const row = btn.closest(".result");
-      const w = row?.querySelector(".embed-wrap");
-      if (w) w.classList.toggle("hidden");
-      return;
-    }
-    const collapse = e.target.closest(".collapse-all");
-    if (collapse) {
-      const tile = collapse.closest("[data-results]");
-      tile?.querySelectorAll(".embed-wrap").forEach(el => el.classList.add("hidden"));
-    }
   });
 
   // Gallery viewer
@@ -985,7 +951,7 @@ $("#globalSettingsBtn")?.addEventListener("click", ()=>{
 });
 
 /* -----------------------------
-   Modal helpers (safe defaults)
+   Modal helpers
 ----------------------------- */
 (function modalSafetyNet(){
   const modal = document.getElementById('modal');
