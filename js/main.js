@@ -1,16 +1,13 @@
 /* ============================================================
    LifeCre8 — main.js  v1.10.2
-   Built on: v1.9.10 lineage
-   What's new (vs 1.9.x):
-   - Travel intent: normalize vague queries (e.g., “UK holiday ideas”)
-     to center on the United Kingdom instead of a world map.
-   - Assistant chat is standalone: uses /api/ai-chat and NEVER
-     triggers Add-Tile logic.
-   - Add Tile behaves like a mini assistant:
-       1) tries /api/ai-tile (single tile JSON),
-       2) safe intent fallbacks (travel/news/etc),
-       3) final AI plan fallback (/api/ai-plan) -> single tile.
-   - Restores stopDynamicTimers / stopLiveIntervals to fix render error.
+   Built on: v1.10.1 (your stable)
+
+   What's new:
+   - Add-Tile now calls /api/ai-tile for general queries
+     → returns a *multi-result* tile with clean link cards
+     → no iframes by default (optional per-link Embed)
+   - Travel intent still normalizes "UK holiday ideas" etc.
+   - Assistant chat remains standalone via /api/ai-chat
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -19,7 +16,7 @@ const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
 const K_PREFS      = "lifecre8.prefs";
-const DATA_VERSION = 5;
+const DATA_VERSION = 6;
 
 /* ===== Presets ===== */
 const RSS_PRESETS = {
@@ -63,14 +60,18 @@ document.body.classList.toggle('density-compact',  prefs.density === 'compact');
 let dynamicTimers = {};
 let liveIntervals = {};
 
-const appEl = document.querySelector(".app");
-
 /* ===== Utils ===== */
 const $  = q => document.querySelector(q);
 const $$ = q => Array.from(document.querySelectorAll(q));
 const uid   = () => Math.random().toString(36).slice(2);
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
+const favOf  = (u) => {
+  const h = hostOf(u);
+  return h ? `https://www.google.com/s2/favicons?domain=${h}&sz=32` : "";
+};
+
+const appEl = document.querySelector(".app");
 
 /* Backdrop for fullscreen */
 let fsBackdrop = document.getElementById("fsBackdrop");
@@ -81,7 +82,7 @@ if (!fsBackdrop) {
 }
 
 /* -----------------------------
-   YouTube helpers
+   YouTube helpers (unchanged)
 ----------------------------- */
 const YT_DEFAULTS = [
   "M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk",
@@ -118,7 +119,7 @@ function ytPlaylistMarkup(playlist, currentId) {
 ----------------------------- */
 function webTileMarkup(url, mode = "preview") {
   const host = hostOf(url);
-  const favicon = host ? `https://www.google.com/s2/favicons?domain=${host}&sz=32` : "";
+  const favicon = favOf(url);
   if (mode === "embed") {
     return `
       <div class="web-tile" data-web data-url="${url}" data-mode="embed">
@@ -152,6 +153,44 @@ function webTileMarkup(url, mode = "preview") {
 }
 
 /* -----------------------------
+   Clean multi-result tile (new)
+----------------------------- */
+function resultsTileMarkup(q, items) {
+  const list = (items || []).map((it, idx) => {
+    const host = hostOf(it.url);
+    const fav  = favOf(it.url);
+    const type = (it.kind || "link").toUpperCase();
+    return `
+      <div class="result" data-index="${idx}">
+        <div class="row" style="gap:10px;align-items:flex-start">
+          <img class="favicon" src="${fav}" alt="">
+          <div class="grow">
+            <a class="title" href="${it.url}" target="_blank" rel="noopener">${it.title || host}</a>
+            ${it.snippet ? `<div class="muted">${it.snippet}</div>` : ""}
+            <div class="muted" style="font-size:12px;margin-top:4px">${type} — ${host}</div>
+          </div>
+          <button class="btn xs embed-link" data-url="${it.url}">Embed</button>
+        </div>
+        <div class="embed-wrap hidden">
+          <iframe src="${it.url}" loading="lazy"></iframe>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  return `
+    <div class="results-tile" data-results data-q="${encodeURIComponent(q)}">
+      <div class="results-controls">
+        <button class="btn sm collapse-all">Collapse embeds</button>
+      </div>
+      <div class="results-list">
+        ${list || `<div class="muted">No suggestions yet.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+/* -----------------------------
    Maps tile (travel intent)
 ----------------------------- */
 function mapsTileMarkup(query){
@@ -171,37 +210,27 @@ function mapsTileMarkup(query){
   `;
 }
 
-/* ---- Normalize vague/UK travel queries ---- */
+/* ---- Travel query normalization (shared with API) ---- */
 function normalizeTravelQuery(val){
   const raw = (val || "").trim();
   if (!raw) return raw;
-  if (/\bnear me\b/i.test(raw)) return raw; // respect local searches
+  if (/\bnear me\b/i.test(raw)) return raw;
 
   const ukWords = /\b(uk|u\.k\.|united kingdom|england|scotland|wales|northern ireland)\b/i;
   const hasPlaceHint = /\b(in|near|around)\s+[A-Za-z][\w\s'-]+$/i.test(raw);
   const isVeryGeneric = /\b(holiday|holidays|break|breaks|trip|trips|ideas|getaway|getaways|staycation|weekend)\b/i.test(raw);
 
-  if (ukWords.test(raw)) return /united kingdom/i.test(raw) ? raw : `${raw} United Kingdom`;
-  if (!hasPlaceHint && isVeryGeneric) return `${raw} United Kingdom`;
+  if (ukWords.test(raw)) {
+    return /united kingdom/i.test(raw) ? raw : `${raw} United Kingdom`;
+  }
+  if (!hasPlaceHint && isVeryGeneric) {
+    return `${raw} United Kingdom`;
+  }
   return raw;
 }
 
 /* -----------------------------
-   Spotify tile
------------------------------ */
-function spotifyMarkup(spotifyUrl) {
-  const src = spotifyUrl.replace("open.spotify.com/", "open.spotify.com/embed/");
-  return `
-    <div data-spotify>
-      <iframe style="border-radius:12px" src="${src}"
-        width="100%" height="232" frameborder="0" allowfullscreen=""
-        allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"></iframe>
-    </div>
-  `;
-}
-
-/* -----------------------------
-   RSS tile (enriched)
+   RSS tile (unchanged rendering)
 ----------------------------- */
 function rssListMarkup(items) {
   const list = (items || []).map(i => `
@@ -373,18 +402,6 @@ function ensureVersion() {
 }
 
 /* -----------------------------
-   Dynamic tile timers (restored)
------------------------------ */
-function stopDynamicTimers() {
-  for (const k in dynamicTimers) clearInterval(dynamicTimers[k]);
-  dynamicTimers = {};
-}
-function stopLiveIntervals() {
-  for (const k in liveIntervals) clearInterval(liveIntervals[k]);
-  liveIntervals = {};
-}
-
-/* -----------------------------
    Rendering
 ----------------------------- */
 function tileContentFor(section) {
@@ -403,9 +420,15 @@ function tileContentFor(section) {
       const q = section.meta?.q || "nearby";
       return mapsTileMarkup(q);
     }
+    case "results": {
+      const q = section.meta?.q || "";
+      const items = section.meta?.items || [];
+      return resultsTileMarkup(q, items);
+    }
     case "spotify": {
       const url = section.meta?.url || "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
-      return spotifyMarkup(url);
+      const src = url.replace("open.spotify.com/", "open.spotify.com/embed/");
+      return `<iframe style="border-radius:12px" src="${src}" width="100%" height="232" frameborder="0" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"></iframe>`;
     }
     case "rss": {
       return section.content || rssLoadingMarkup();
@@ -433,7 +456,6 @@ function render() {
   stopLiveIntervals();
 
   const grid = $("#grid");
-  if (!grid) return;
   grid.innerHTML = "";
 
   const others = sections.filter(s=>s.type!=="email");
@@ -465,7 +487,7 @@ function render() {
   const grid = $("#grid");
 
   // Expand / Collapse
-  grid?.addEventListener("click", (e)=>{
+  grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".expandBtn");
     if (!btn) return;
     const card = btn.closest(".card");
@@ -485,7 +507,7 @@ function render() {
   });
 
   // Remove
-  grid?.addEventListener("click", (e)=>{
+  grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".removeBtn");
     if (!btn) return;
     const card = btn.closest(".card");
@@ -500,8 +522,8 @@ function render() {
     render();
   });
 
-  // Settings (per tile)
-  grid?.addEventListener("click", (e)=>{
+  // Settings (generic small panels for supported tiles)
+  grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".settingsBtn");
     if (!btn) return;
     const id = btn.dataset.id;
@@ -533,51 +555,14 @@ function render() {
           <input class="input" id="set_maps_q" value="${q}">
         </div>
       `;
-    } else if (s.type === "youtube") {
-      const list = (s.meta?.playlist || YT_DEFAULTS).join(",");
+    } else if (s.type === "results") {
+      const q = s.meta?.q || "";
       fields = `
         <div class="field">
-          <label>Playlist (comma-separated video IDs)</label>
-          <input class="input" id="set_playlist" value="${list}">
+          <label>Query</label>
+          <input class="input" id="set_results_q" value="${q}">
         </div>
-      `;
-    } else if (s.type === "stocks") {
-      const syms = (s.meta?.symbols || ["AAPL","MSFT","BTC-USD"]).join(",");
-      const presetOptions = Object.keys(STOCK_PRESETS).map(name=>`<option value="${name}">${name}</option>`).join("");
-      fields = `
-        <div class="field">
-          <label>Symbols (comma-separated)</label>
-          <input class="input" id="set_symbols" value="${syms}">
-        </div>
-        <div class="field">
-          <label>Presets</label>
-          <div class="row" style="gap:8px">
-            <select class="input" id="set_symbols_preset" style="min-width:180px">
-              <option value="">Choose a preset…</option>
-              ${presetOptions}
-            </select>
-            <button class="btn sm" id="apply_symbols_preset" type="button">Apply</button>
-          </div>
-        </div>
-      `;
-    } else if (s.type === "rss") {
-      const feeds = (s.meta?.feeds || RSS_PRESETS.uk).join(",");
-      const presetOptions = Object.keys(RSS_PRESETS).map(key=>`<option value="${key}">${key.toUpperCase()}</option>`).join("");
-      fields = `
-        <div class="field">
-          <label>RSS feeds (comma-separated URLs; first is used)</label>
-          <input class="input" id="set_feeds" value="${feeds}">
-        </div>
-        <div class="field">
-          <label>News Presets</label>
-          <div class="row" style="gap:8px">
-            <select class="input" id="set_feeds_preset" style="min-width:180px">
-              <option value="">Choose a preset…</option>
-              ${presetOptions}
-            </select>
-            <button class="btn sm" id="apply_feeds_preset" type="button">Apply</button>
-          </div>
-        </div>
+        <div class="muted">This tile lists multiple results with optional per-link embeds.</div>
       `;
     } else {
       fields = `<div class="muted">No settings for this tile.</div>`;
@@ -595,20 +580,7 @@ function render() {
     `;
     __openModal(html);
 
-    $("#apply_symbols_preset")?.addEventListener("click", ()=>{
-      const key = $("#set_symbols_preset").value;
-      if (!key) return;
-      const arr = STOCK_PRESETS[key] || [];
-      $("#set_symbols").value = arr.join(",");
-    });
-    $("#apply_feeds_preset")?.addEventListener("click", ()=>{
-      const key = $("#set_feeds_preset").value;
-      if (!key) return;
-      const arr = RSS_PRESETS[key] || [];
-      $("#set_feeds").value = arr.join(",");
-    });
-
-    $("#settingsSaveBtn")?.addEventListener("click", ()=>{
+    $("#settingsSaveBtn")?.addEventListener("click", async ()=>{
       if (s.type === "web") {
         const url = $("#set_url")?.value?.trim() || s.meta?.url || "";
         const mode = $("#set_mode")?.value || "preview";
@@ -618,22 +590,14 @@ function render() {
         const q = $("#set_maps_q")?.value?.trim() || s.meta?.q || "";
         s.meta = {...(s.meta||{}), q};
         s.content = mapsTileMarkup(q);
-      } else if (s.type === "youtube") {
-        const playlist = ($("#set_playlist")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
-        const list = playlist.length? playlist : (s.meta?.playlist || YT_DEFAULTS);
-        const current = list[0];
-        s.meta = {...(s.meta||{}), playlist:list, current};
-        s.content = ytPlaylistMarkup(list, current);
-      } else if (s.type === "stocks") {
-        const symbols = ($("#set_symbols")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
-        const syms = symbols.length? symbols : (s.meta?.symbols || ["AAPL","MSFT","BTC-USD"]);
-        s.meta = {...(s.meta||{}), symbols: syms};
-        s.content = tickerMarkup(syms);
-      } else if (s.type === "rss") {
-        const feeds = ($("#set_feeds")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
-        const list = feeds.length? feeds : (s.meta?.feeds || RSS_PRESETS.uk);
-        s.meta = {...(s.meta||{}), feeds: list};
-        s.content = rssLoadingMarkup();
+      } else if (s.type === "results") {
+        const q = $("#set_results_q")?.value?.trim() || s.meta?.q || "";
+        const resp = await fetch(`/api/ai-tile?q=${encodeURIComponent(q)}&region=GB`);
+        const data = await resp.json();
+        s.meta = { q, items: data.items || [] };
+        s.title = data.title || `Results — ${q}`;
+        s.type  = "results";
+        s.content = resultsTileMarkup(q, s.meta.items);
       }
       localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
       __closeModal();
@@ -641,7 +605,74 @@ function render() {
     }, { once:true });
   });
 
-  // Backdrop close
+  // Web tile preview <-> embed
+  grid.addEventListener("click", (e) => {
+    const toggle = e.target.closest(".web-toggle");
+    if (!toggle) return;
+    const card = e.target.closest(".card");
+    const tile = e.target.closest("[data-web]");
+    if (!card || !tile) return;
+    const id = card.dataset.id;
+    const s = sections.find(x => x.id === id);
+    if (!s) return;
+    const url = tile.dataset.url;
+    const nextMode = toggle.dataset.mode; // "embed" or "preview"
+    s.meta = s.meta || {};
+    s.meta.url = url;
+    s.meta.mode = nextMode;
+    s.content = webTileMarkup(url, nextMode);
+    localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+    const content = card.querySelector(".content");
+    if (content) content.innerHTML = s.content;
+  });
+
+  // RSS refresh
+  grid.addEventListener("click", (e) => {
+    const refresh = e.target.closest(".rss-refresh");
+    if (!refresh) return;
+    const card = e.target.closest(".card");
+    if (!card) return;
+    const id = card.dataset.id;
+    const s = sections.find(x => x.id === id);
+    if (!s) return;
+    const feeds = s.meta?.feeds || RSS_PRESETS.uk;
+    loadRssInto(card, feeds);
+  });
+
+  // Results tile: per-link Embed and Collapse
+  grid.addEventListener("click", (e)=>{
+    const btn = e.target.closest(".embed-link");
+    if (btn) {
+      const row = btn.closest(".result");
+      const w = row?.querySelector(".embed-wrap");
+      if (w) w.classList.toggle("hidden");
+      return;
+    }
+    const collapse = e.target.closest(".collapse-all");
+    if (collapse) {
+      const tile = collapse.closest("[data-results]");
+      tile?.querySelectorAll(".embed-wrap").forEach(el => el.classList.add("hidden"));
+    }
+  });
+
+  // Gallery viewer
+  grid.addEventListener("click", (e) => {
+    const img = e.target.closest(".gallery img");
+    if (img) {
+      const tile = e.target.closest(".gallery-tile");
+      const view = tile.querySelector(".gallery-view");
+      const large = view.querySelector("img");
+      large.src = img.src;
+      view.classList.add("show");
+      return;
+    }
+    const close = e.target.closest(".gallery-view");
+    if (close) {
+      close.classList.remove("show");
+    }
+  });
+
+  // Backdrop close (fullscreen)
   fsBackdrop.addEventListener("click", ()=>{
     const open = document.querySelector(".card.card-full");
     if (!open) return;
@@ -664,89 +695,19 @@ function render() {
       if (closeBtn) closeBtn.textContent = "⤢ Expand";
     }
   });
-
-  // YouTube swap
-  grid?.addEventListener("click", (e) => {
-    const item = e.target.closest(".yt-item");
-    if (!item) return;
-    const container = item.closest("[data-yt]");
-    if (!container) return;
-    const newId = item.dataset.vid;
-    const iframe = container.querySelector("iframe.yt-embed");
-    if (!iframe) return;
-    container.querySelectorAll(".yt-item").forEach(el => el.classList.remove("active"));
-    item.classList.add("active");
-    iframe.src = ytEmbedSrc(newId);
-    const card = item.closest(".card");
-    const id = card?.dataset.id;
-    if (id) {
-      const s = sections.find(x => x.id === id);
-      if (s) {
-        s.meta = s.meta || {};
-        const existingList = container.dataset.playlist?.split(",").filter(Boolean) || YT_DEFAULTS;
-        s.meta.playlist = existingList;
-        s.meta.current  = newId;
-        s.content = ytPlaylistMarkup(s.meta.playlist, s.meta.current);
-        localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-      }
-    }
-  });
-
-  // Web tile preview <-> embed
-  grid?.addEventListener("click", (e) => {
-    const toggle = e.target.closest(".web-toggle");
-    if (!toggle) return;
-    const card = e.target.closest(".card");
-    const tile = e.target.closest("[data-web]");
-    if (!card || !tile) return;
-    const id = card.dataset.id;
-    const s = sections.find(x => x.id === id);
-    if (!s) return;
-    const url = tile.dataset.url;
-    const nextMode = toggle.dataset.mode; // "embed" or "preview"
-    s.meta = s.meta || {};
-    s.meta.url = url;
-    s.meta.mode = nextMode;
-    s.content = webTileMarkup(url, nextMode);
-    localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-    const content = card.querySelector(".content");
-    if (content) content.innerHTML = s.content;
-  });
-
-  // RSS refresh
-  grid?.addEventListener("click", (e) => {
-    const refresh = e.target.closest(".rss-refresh");
-    if (!refresh) return;
-    const card = e.target.closest(".card");
-    if (!card) return;
-    const id = card.dataset.id;
-    const s = sections.find(x => x.id === id);
-    if (!s) return;
-    const feeds = s.meta?.feeds || RSS_PRESETS.uk;
-    loadRssInto(card, feeds);
-  });
-
-  // Gallery viewer
-  grid?.addEventListener("click", (e) => {
-    const img = e.target.closest(".gallery img");
-    if (img) {
-      const tile = e.target.closest(".gallery-tile");
-      const view = tile.querySelector(".gallery-view");
-      const large = view.querySelector("img");
-      large.src = img.src;
-      view.classList.add("show");
-      return;
-    }
-    const close = e.target.closest(".gallery-view");
-    if (close) {
-      close.classList.remove("show");
-    }
-  });
 })();
 
 /* -----------------------------
    Dynamic tiles & live feeds
 ----------------------------- */
+function stopDynamicTimers(){
+  Object.values(dynamicTimers).forEach(clearInterval);
+  dynamicTimers = {};
+}
+function stopLiveIntervals(){
+  Object.values(liveIntervals).forEach(clearInterval);
+  liveIntervals = {};
+}
 function initDynamicTiles(){
   // Football heartbeat (simulated)
   $$('.card[data-type="football"]').forEach(card=>{
@@ -838,7 +799,7 @@ function renderTicker(card, prices, prev){
 }
 
 /* -----------------------------
-   Add Tile (mini assistant)
+   Add Tile — AI-first (multi-result)
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
@@ -854,162 +815,76 @@ tileSearch?.addEventListener("keydown", (e)=>{
     if (e.key === "Escape") tileMenu.classList.add("hidden");
     return;
   }
+
   const valRaw = tileSearch.value.trim();
   if (!valRaw) return;
   const val = valRaw.replace(/\s+/g, " ");
+  let newTile = null;
 
-  // 0) Try AI single-tile endpoint
-  fetch(`/api/ai-tile?q=${encodeURIComponent(val)}`, { method:"GET" })
-    .then(r => r.ok ? r.json() : Promise.reject(new Error("no ai-tile")))
-    .then(t => {
-      const made = makeTileFromPlan(val, t && (t.tile || t));
-      if (!made) throw new Error("ai-tile unsupported");
-      addAndRender(made);
-    })
-    .catch(()=> {
-      // 1) Travel intent → Maps (normalized)
-      const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|getaway|staycation|weekend)/i;
-      const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
-      if (TRAVEL_RE.test(val) || GEO_HINT.test(val)) {
-        const q = normalizeTravelQuery(val);
-        return addAndRender({ id: uid(), type:"maps", title:`Search — ${val}`, meta:{ q }, content: mapsTileMarkup(q) });
-      }
+  /* Travel intent → Maps */
+  const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|holidays|getaway|staycation|weekend)/i;
+  const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
+  if (TRAVEL_RE.test(val) || GEO_HINT.test(val)) {
+    const q = normalizeTravelQuery(val);
+    newTile = {
+      id: uid(),
+      type: "maps",
+      title: `Search — ${val}`,
+      meta: { q },
+      content: mapsTileMarkup(q)
+    };
+  }
 
-      // 2) Quick commands: news
-      const mNews = val.match(/^news(?:\s+(.+))?$/i);
-      if (mNews) {
-        const topic = (mNews[1]||"").trim();
-        if (!topic) {
-          const feeds = RSS_PRESETS.uk;
-          return addAndRender({ id: uid(), type:"rss", title:"Daily Brief (UK)", meta:{ feeds }, content: rssLoadingMarkup() });
-        } else {
-          const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(topic)}&hl=en-GB&gl=GB&ceid=GB:en`;
-          return addAndRender({ id: uid(), type:"rss", title:`Daily Brief — ${topic}`, meta:{ feeds:[feedUrl] }, content: rssLoadingMarkup() });
-        }
-      }
+  /* URL → Web */
+  const isUrl = /^https?:\/\//i.test(val);
+  if (!newTile && isUrl) {
+    const url = val;
+    newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
+  }
 
-      // 3) Football fixtures (today)
-      if (/(football|soccer).*(fixtures|today|scores)/i.test(val)) {
-        const fixUrl = "https://www.bbc.co.uk/sport/football/scores-fixtures";
-        const html = `
-          <div>
-            <div class="muted">Quick fixtures snapshot — open BBC for full details.</div>
-            <ul id="fx-quick" style="margin:8px 0 12px; display:grid; gap:6px;"></ul>
-            <div class="web-actions">
-              <button class="btn sm web-toggle" data-mode="embed">Embed</button>
-              <a class="btn sm" href="${fixUrl}" target="_blank" rel="noopener">Open</a>
-            </div>
-          </div>`;
-        const newTile = { id: uid(), type:"web", title:"Football — Fixtures (Today)", meta:{ url: fixUrl, mode:"preview" }, content: html };
-        addAndRender(newTile);
-        setTimeout(()=>{
-          const card = document.querySelector(`.card[data-id="${newTile.id}"]`);
-          const list = card?.querySelector('#fx-quick');
-          if (!list) return;
-          fetch(`/api/rss?url=${encodeURIComponent('https://feeds.bbci.co.uk/sport/football/rss.xml')}`)
-            .then(r=>r.json()).then(data=>{
-              const items = (data.items||[]).slice(0,5);
-              list.innerHTML = items.map(i=>`<li><a href="${i.link}" target="_blank" rel="noopener">${i.title}</a></li>`).join("");
-            })
-            .catch(()=>{ list.innerHTML = `<li class="muted">Open for full fixtures →</li>`; });
-        }, 80);
-        return;
-      }
+  // If still no tile, ask the AI multi-result endpoint
+  const goAi = async () => {
+    try {
+      const r = await fetch(`/api/ai-tile?q=${encodeURIComponent(val)}&region=GB`);
+      if (!r.ok) throw new Error("ai-tile not available");
+      const data = await r.json();
+      const s = {
+        id: uid(),
+        type: "results",
+        title: data.title || `Results — ${val}`,
+        meta: { q: val, items: data.items || [] },
+        content: resultsTileMarkup(val, data.items || []),
+      };
+      sections.unshift(s);
+      localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+      render();
+      tileMenu.classList.add("hidden");
+      tileSearch.value = "";
+    } catch {
+      // Fallback: RSS search
+      const gn  = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
+      const s = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
+      sections.unshift(s);
+      localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+      render();
+      tileMenu.classList.add("hidden");
+      tileSearch.value = "";
+    }
+  };
 
-      // 4) YouTube
-      const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
-      if (ytUrl) {
-        const videoId = ytUrl[1];
-        const playlist = [videoId, ...YT_DEFAULTS.filter(x=>x!==videoId)].slice(0,4);
-        return addAndRender({ id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:videoId}, content: ytPlaylistMarkup(playlist, videoId) });
-      } else if (/^youtube\s+/i.test(val)) {
-        const playlist = [...YT_DEFAULTS];
-        return addAndRender({ id: uid(), type:"youtube", title:"YouTube", meta:{playlist, current:playlist[0]}, content: ytPlaylistMarkup(playlist, playlist[0]) });
-      }
-
-      // 5) Spotify
-      if (/spotify/i.test(val)) {
-        const url = "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
-        return addAndRender({ id: uid(), type:"spotify", title:"Spotify", meta:{url}, content: spotifyMarkup(url) });
-      }
-
-      // 6) Stocks
-      if (/stocks?|markets?/i.test(val)) {
-        const symbols = ["AAPL","MSFT","BTC-USD"];
-        return addAndRender({ id: uid(), type:"stocks", title:"Markets", meta:{symbols}, content: tickerMarkup(symbols) });
-      }
-
-      // 7) Weather (stub)
-      if (/weather/i.test(val)) {
-        const html = `
-          <div class="row"><strong>London</strong><span class="muted">Next 24h</span></div>
-          <div class="row" style="margin-top:8px">
-            <div>🌤️</div><div class="muted">Partly cloudy</div><div>18°C</div>
-          </div>`;
-        return addAndRender({ id: uid(), type:"weather", title:"Weather", content: html });
-      }
-
-      // 8) URL -> Web
-      const isUrl = /^https?:\/\//i.test(val);
-      if (isUrl) {
-        const url = val;
-        return addAndRender({ id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") });
-      }
-
-      // 9) AI plan fallback -> single tile
-      fetch(`/api/ai-plan?q=${encodeURIComponent(val)}`, { method:"GET" })
-        .then(r=> r.ok ? r.json() : Promise.reject(new Error("plan fail")))
-        .then(plan=>{
-          const t = plan.tile || (Array.isArray(plan.tiles) ? plan.tiles[0] : null);
-          const made = makeTileFromPlan(val, t);
-          if (!made) throw new Error("no supported tile");
-          addAndRender(made);
-        })
-        .catch(()=>{
-          // last resort: RSS topical brief
-          const gn  = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
-          addAndRender({ id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() });
-        });
-
-    });
-
-  function addAndRender(tile){
-    sections.unshift(tile);
+  if (newTile) {
+    sections.unshift(newTile);
     localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
     render();
     tileMenu.classList.add("hidden");
     tileSearch.value = "";
+  } else {
+    goAi();
   }
 });
 
-/* Helper: make tile from AI plan object */
-function makeTileFromPlan(val, t){
-  if (!t) return null;
-  if (t.type === "rss" && t.feeds?.length) {
-    return { id: uid(), type:"rss", title: t.title || `Daily Brief — ${val}`, meta:{ feeds: t.feeds }, content: rssLoadingMarkup() };
-  }
-  if (t.type === "web" && t.url) {
-    return { id: uid(), type:"web", title: t.title || hostOf(t.url) || "Web", meta:{ url: t.url, mode:"preview" }, content: webTileMarkup(t.url, "preview") };
-  }
-  if (t.type === "youtube" && t.playlist?.length) {
-    const cur = t.playlist[0];
-    return { id: uid(), type:"youtube", title: t.title || "YouTube", meta:{ playlist: t.playlist, current: cur }, content: ytPlaylistMarkup(t.playlist, cur) };
-  }
-  if (t.type === "stocks" && t.symbols?.length) {
-    return { id: uid(), type:"stocks", title: t.title || "Markets", meta:{ symbols: t.symbols }, content: tickerMarkup(t.symbols) };
-  }
-  if (t.type === "gallery" && t.images?.length) {
-    return { id: uid(), type:"gallery", title: t.title || "Gallery", meta:{ urls: t.images }, content: galleryMarkup(t.images) };
-  }
-  if (t.type === "maps" && t.q) {
-    const qn = normalizeTravelQuery(t.q);
-    return { id: uid(), type:"maps", title: t.title || `Search — ${qn}`, meta:{ q: qn }, content: mapsTileMarkup(qn) };
-  }
-  return null;
-}
-
 /* -----------------------------
-   Assistant Toggle & Chat  (standalone chat)
+   Assistant Toggle & Chat (standalone)
 ----------------------------- */
 const assistantToggle = $("#assistantToggle");
 const assistantPanel  = $("#assistantPanel");
@@ -1047,7 +922,6 @@ function addChat(role, text){
   renderChat();
 }
 
-// Submit → /api/ai-chat (never add tiles)
 chatForm?.addEventListener("submit", async (e)=>{
   e.preventDefault();
   const text = chatInput.value.trim();
@@ -1056,6 +930,7 @@ chatForm?.addEventListener("submit", async (e)=>{
   chatInput.value = "";
   try {
     const r = await fetch(`/api/ai-chat?q=${encodeURIComponent(text)}`);
+    if (!r.ok) throw new Error("chat endpoint not available");
     const j = await r.json();
     addChat('ai', j.message || "…");
   } catch {
@@ -1110,7 +985,7 @@ $("#globalSettingsBtn")?.addEventListener("click", ()=>{
 });
 
 /* -----------------------------
-   Modal helpers (idempotent)
+   Modal helpers (safe defaults)
 ----------------------------- */
 (function modalSafetyNet(){
   const modal = document.getElementById('modal');

@@ -1,97 +1,131 @@
-// /api/ai-tile.js
-// Returns ONE best-fit tile for a free-form query.
-// Env: OPENAI_API_KEY must be set in Vercel -> Settings -> Environment Variables.
+// api/ai-tile.js
+/**
+ * Multi-result AI tile endpoint
+ * - Always returns several high-quality link targets (no iframes by default)
+ * - Adds travel helpers (Maps / Booking / Tripadvisor) when query looks travel-y
+ * - Never fabricates sources; uses trusted query URLs
+ *
+ * Query:  /api/ai-tile?q=<string>
+ * Optional: &region=GB (affects Google/YouTube params a bit)
+ *
+ * Response shape:
+ *  {
+ *    title: string,
+ *    items: Array<{
+ *      kind: 'article'|'video'|'map'|'search'|'site',
+ *      title: string,
+ *      url: string,
+ *      snippet?: string
+ *    }>
+ *  }
+ */
 
-const MODEL = 'gpt-4o-mini';
-
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   try {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const q = (url.searchParams.get('q') || '').trim();
+    const q = String(req.query.q || "").trim();
+    const region = (req.query.region || "GB").toUpperCase();
 
-    const apiKey = process.env.OPENAI_API_KEY || process.env.OPENAI_APIKEY || process.env.OPEN_AI_KEY || process.env.OPEN_API_KEY;
-    if (!apiKey) {
-      return res.status(200).json({
-        message: "AI-tile is in demo mode (no API key on the server).",
-        diag: { hasKey: false }
-      });
+    if (!q) {
+      return res.status(400).json({ error: "Missing q" });
     }
-    if (!q) return res.status(400).json({ error: "Missing q" });
 
-    // System prompt: make ONE tile only, using our allowed schema.
-    const system = `
-You are the "tile planner" for a dashboard. Given a user query, output a SINGLE tile
-object that best answers the request. Use ONLY this JSON shape:
+    // Helpers
+    const enc = encodeURIComponent;
+    const gg = (s) =>
+      `https://www.google.com/search?q=${enc(s)}&hl=en-${region}&gl=${region}`;
+    const gnews = (s) =>
+      `https://news.google.com/search?q=${enc(s)}&hl=en-${region}&gl=${region}&ceid=${region}:en`;
+    const yt = (s) =>
+      `https://www.youtube.com/results?search_query=${enc(s)}`;
+    const maps = (s) => `https://www.google.com/maps/search/${enc(s)}`;
+    const wiki = (s) =>
+      `https://en.wikipedia.org/w/index.php?search=${enc(s)}`;
 
-{
-  "type": "maps" | "web" | "rss" | "youtube" | "gallery" | "stocks" | "spotify",
-  "title": string,
-  // extras by type:
-  "q": string,                       // maps
-  "url": string,                     // web|spotify
-  "feeds": [string],                 // rss
-  "playlist": [string],              // youtube (list of video IDs)
-  "images": [string],                // gallery (absolute URLs)
-  "symbols": [string]                // stocks (tickers or crypto symbols)
+    const looksTravel = /(hotel|resort|hostel|bnb|air\s*bnb|airbnb|spa|retreat|villa|lodg(e|ing)|guesthouse|inn|aparthotel|beach|city\s*break|holiday|holidays|staycation|getaway|wellness|yoga|near me|in\s+[A-Za-z][\w\s'-]+)$/i.test(
+      q
+    );
+
+    // Always offer a few “best bets” links (no fabrications)
+    const items = [
+      {
+        kind: "search",
+        title: "Top results on Google",
+        url: gg(q),
+        snippet: "Open a full web search for broader coverage.",
+      },
+      {
+        kind: "article",
+        title: "News coverage (Google News)",
+        url: gnews(q),
+        snippet: "Recent and reputable news sources about this topic.",
+      },
+      {
+        kind: "video",
+        title: "Watch on YouTube",
+        url: yt(q),
+        snippet: "Tutorials, walkthroughs, explainers, and reviews.",
+      },
+      {
+        kind: "site",
+        title: "Wikipedia overview",
+        url: wiki(q),
+        snippet: "Neutral overview and key facts, when available.",
+      },
+    ];
+
+    if (looksTravel) {
+      const normQ = normalizeTravelQuery(q);
+      items.unshift({
+        kind: "map",
+        title: `View on Google Maps — ${normQ}`,
+        url: maps(normQ),
+        snippet: "Explore places, ratings, and routes on the map.",
+      });
+      items.push(
+        {
+          kind: "site",
+          title: "Booking.com",
+          url: `https://www.booking.com/searchresults.html?ss=${enc(normQ)}`,
+          snippet: "Hotels and stays (filters, prices, availability).",
+        },
+        {
+          kind: "site",
+          title: "Tripadvisor",
+          url: `https://www.tripadvisor.com/Search?q=${enc(normQ)}`,
+          snippet: "Reviews, rankings, attractions, food & activities.",
+        }
+      );
+    }
+
+    return res.status(200).json({
+      title: `Results — ${q}`,
+      items,
+    });
+  } catch (err) {
+    console.error("[ai-tile] error:", err);
+    return res.status(500).json({ error: "ai-tile failed" });
+  }
 }
 
-Decision rules:
-- If the query looks like travel/place discovery (retreat, hotel, spa, resort, "in <city>", "near me", etc.)
-  prefer {"type":"maps","q":<cleaned search>}.
-- If the query is "news <topic>" or trending/current-events -> {"type":"rss","feeds":[Google News RSS for that topic]}.
-- If explicitly a URL -> {"type":"web","url":<same>}.
-- If a YouTube share URL -> youtube tile with that video ID in "playlist".
-- If "stocks", "BTC", tickers, "markets" -> stocks tile.
-- If "photos", "wallpapers", "art" -> gallery tile with 4–8 image URLs.
-- Else: prefer a good web page (web tile). If unsure, fall back to RSS for the topic.
+// Shared with client (keep in sync with main.js)
+function normalizeTravelQuery(val) {
+  const raw = (val || "").trim();
+  if (!raw) return raw;
+  if (/\bnear me\b/i.test(raw)) return raw;
 
-Never return multiple tiles. Always return valid JSON only.
-    `.trim();
+  const ukWords =
+    /\b(uk|u\.k\.|united kingdom|england|scotland|wales|northern ireland)\b/i;
+  const hasPlaceHint = /\b(in|near|around)\s+[A-Za-z][\w\s'-]+$/i.test(raw);
+  const isVeryGeneric =
+    /\b(holiday|holidays|break|breaks|trip|trips|ideas|getaway|getaways|staycation|weekend)\b/i.test(
+      raw
+    );
 
-    const user = `Query: ${q}\nReturn only the JSON object, no prose.`;
-
-    const r = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: MODEL,
-        temperature: 0.2,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user }
-        ]
-      })
-    });
-
-    if (!r.ok) {
-      const txt = await r.text();
-      return res.status(500).json({ error: "openai_error", details: txt });
-    }
-
-    const data = await r.json();
-    const raw = data?.choices?.[0]?.message?.content?.trim() || '{}';
-
-    // Some models wrap in ```json fences — strip if present.
-    const jsonStr = raw.replace(/^```json\s*/i, '').replace(/```$/i, '');
-    let tile;
-    try { tile = JSON.parse(jsonStr); }
-    catch { return res.status(200).json({ message: "Could not parse model JSON.", raw }); }
-
-    // Sanity: coerce type + allow-list fields only
-    const allow = new Set(["maps","web","rss","youtube","gallery","stocks","spotify"]);
-    if (!allow.has(tile.type)) tile.type = "web";
-    const out = { type: tile.type, title: tile.title || q };
-    if (tile.type === "maps") out.q = tile.q || q;
-    if (tile.type === "web") out.url = tile.url || `https://www.google.com/search?q=${encodeURIComponent(q)}`;
-    if (tile.type === "spotify") out.url = tile.url || "https://open.spotify.com/";
-    if (tile.type === "rss") out.feeds = Array.isArray(tile.feeds) && tile.feeds.length ? tile.feeds
-      : [`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`];
-    if (tile.type === "youtube") out.playlist = Array.isArray(tile.playlist) && tile.playlist.length ? tile.playlist : [];
-    if (tile.type === "gallery") out.images = Array.isArray(tile.images) ? tile.images.slice(0, 8) : [];
-    if (tile.type === "stocks") out.symbols = Array.isArray(tile.symbols) && tile.symbols.length ? tile.symbols : ["AAPL","MSFT","BTC-USD"];
-
-    return res.status(200).json({ tile: out });
-  } catch (err) {
-    return res.status(500).json({ error: "server_error", details: String(err) });
+  if (ukWords.test(raw)) {
+    return /united kingdom/i.test(raw) ? raw : `${raw} United Kingdom`;
   }
-};
+  if (!hasPlaceHint && isVeryGeneric) {
+    return `${raw} United Kingdom`;
+  }
+  return raw;
+}
