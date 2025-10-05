@@ -1,12 +1,10 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.10.7
-   Built on: v1.10.6 (stable)
+   LifeCre8 — main.js  v1.10.8
+   Built on: v1.10.7
    What's new:
-   - Travel intent smarter: demonyms → countries (Thai→Thailand,
-     French→France, Spanish→Spain, etc.) + better “in/near” parsing
-   - Daily Brief auto-load reliability improved (RSS loads on first render)
-   - Web tile “Embed” toggle removed (cleaner UI)
-   - Keeps assistant as standalone chat via /api/ai-chat
+   - FIX (Safari): avoid assignment on optional-chained target
+     when setting footer year label.
+   - Everything else unchanged from v1.10.7.
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -156,7 +154,6 @@ function mapsTileMarkup(query){
 
 /* ---- Demonyms → Countries & query normalization ---- */
 const DEMONYMS = {
-  // common singles
   "british":"United Kingdom","english":"England","scottish":"Scotland","welsh":"Wales","irish":"Ireland",
   "french":"France","spanish":"Spain","italian":"Italy","german":"Germany","portuguese":"Portugal",
   "thai":"Thailand","greek":"Greece","turkish":"Turkey","dutch":"Netherlands","swiss":"Switzerland",
@@ -169,7 +166,6 @@ const DEMONYMS = {
 
 function demonymToCountry(text){
   const l = text.toLowerCase();
-  // multi-word keys first
   for (const k of Object.keys(DEMONYMS).sort((a,b)=>b.length-a.length)) {
     if (l.includes(k)) return DEMONYMS[k];
   }
@@ -179,26 +175,16 @@ function demonymToCountry(text){
 function normalizeTravelQuery(val){
   const raw = (val || "").trim();
   if (!raw) return raw;
-
-  // "near me" → don't add a country suffix
   if (/\bnear me\b/i.test(raw)) return raw;
-
-  // If already has explicit geo like "in Paris" or "in France", leave it
-  const hasPlaceHint = /\b(in|near|around)\s+[A-Za-z][\w\s'-]+$/i.test(raw);
-  if (hasPlaceHint) return raw;
-
-  // If it already mentions UK countries by name, add "United Kingdom" to anchor Maps
-  const ukWords = /\b(uk|u\.k\.|united kingdom|england|scotland|wales|northern ireland)\b/i;
-  if (ukWords.test(raw) && !/united kingdom/i.test(raw)) return `${raw} United Kingdom`;
-
-  // Demonym → country, e.g., "Thai villas" -> "... Thailand"
+  if (/\b(in|near|around)\s+[A-Za-z][\w\s'-]+$/i.test(raw)) return raw;
+  if (/\b(uk|u\.k\.|united kingdom|england|scotland|wales|northern ireland)\b/i.test(raw) && !/united kingdom/i.test(raw)) {
+    return `${raw} United Kingdom`;
+  }
   const country = demonymToCountry(raw);
   if (country && !new RegExp(country, "i").test(raw)) return `${raw} ${country}`;
-
-  // If very generic holiday query, default to UK to avoid world view
-  const isVeryGeneric = /\b(holiday|holidays|break|breaks|trip|trips|ideas|getaway|getaways|staycation|weekend)\b/i.test(raw);
-  if (isVeryGeneric) return `${raw} United Kingdom`;
-
+  if (/\b(holiday|holidays|break|breaks|trip|trips|ideas|getaway|getaways|staycation|weekend)\b/i.test(raw)) {
+    return `${raw} United Kingdom`;
+  }
   return raw;
 }
 
@@ -457,7 +443,7 @@ function render() {
   });
 
   initDynamicTiles();
-  initLiveFeeds();   // <— ensures RSS loads on first render
+  initLiveFeeds();
 }
 
 /* -----------------------------
@@ -502,7 +488,7 @@ function render() {
     render();
   });
 
-  // Settings (per tile)
+  // Settings
   grid.addEventListener("click", (e)=>{
     const btn = e.target.closest(".settingsBtn");
     if (!btn) return;
@@ -685,7 +671,7 @@ function render() {
     }
   });
 
-  // RSS refresh button
+  // RSS refresh
   grid.addEventListener("click", (e) => {
     const refresh = e.target.closest(".rss-refresh");
     if (!refresh) return;
@@ -842,7 +828,6 @@ tileSearch.addEventListener("keydown", (e)=>{
   const val = valRaw.replace(/\s+/g, " ");
   let newTile = null;
 
-  /* 1) Travel intent → Maps (normalized) */
   const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|getaway|staycation|weekend|canal\s*boat|river\s*cruise|self\s*catering|villas?)/i;
   const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
 
@@ -857,7 +842,6 @@ tileSearch.addEventListener("keydown", (e)=>{
     };
   }
 
-  /* 2) Quick command: "news" / "news <topic>" */
   if (!newTile) {
     const mNews = val.match(/^news(?:\s+(.+))?$/i);
     if (mNews) {
@@ -872,7 +856,6 @@ tileSearch.addEventListener("keydown", (e)=>{
     }
   }
 
-  /* 3) YouTube quick */
   if (!newTile) {
     const ytUrl = val.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
     if (ytUrl) {
@@ -882,14 +865,12 @@ tileSearch.addEventListener("keydown", (e)=>{
     }
   }
 
-  /* 4) URL → Web */
   const isUrl = /^https?:\/\//i.test(val);
   if (!newTile && isUrl) {
     const url = val;
     newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url }, content: webTileMarkup(url) };
   }
 
-  /* 5) Otherwise: ask server AI to plan ONE tile */
   if (!newTile) {
     fetch(`/api/ai-tile?q=${encodeURIComponent(val)}`, { method:"GET" })
       .then(r=>{ if (!r.ok) throw new Error("ai-tile not available"); return r.json(); })
@@ -908,7 +889,6 @@ tileSearch.addEventListener("keydown", (e)=>{
           const qn = normalizeTravelQuery(t.q);
           made = { id: uid(), type:"maps", title: t.title || `Search — ${qn}`, meta:{ q: qn }, content: mapsTileMarkup(qn) };
         } else {
-          // last-ditch fallback → topic RSS
           const gn  = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
           made = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
         }
@@ -929,10 +909,9 @@ tileSearch.addEventListener("keydown", (e)=>{
         tileSearch.value = "";
       });
 
-    return; // async path ends here
+    return;
   }
 
-  // Persist & render for synchronous branches
   sections.unshift(newTile);
   localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
   render();
@@ -978,7 +957,6 @@ function addChat(role, text){
   renderChat();
 }
 
-// Submit → /api/ai-chat (never add tiles)
 chatForm?.addEventListener("submit", async (e)=>{
   e.preventDefault();
   const text = chatInput.value.trim();
@@ -1087,9 +1065,11 @@ $("#globalSettingsBtn")?.addEventListener("click", ()=>{
    Init
 ----------------------------- */
 document.addEventListener("DOMContentLoaded", () => {
-  $("#yr")?.textContent = new Date().getFullYear();
+  const yrEl = $("#yr");               // <-- FIX: no optional-chaining assignment
+  if (yrEl) yrEl.textContent = new Date().getFullYear();
+
   ensureVersion();
-  updateAssistant();   // uses K_ASSIST_ON state
-  renderChat();        // renders existing chat log
+  updateAssistant();
+  renderChat();
   render();
 });
