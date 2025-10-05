@@ -1,10 +1,12 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.10.3
-   Built on: v1.10.2
+   LifeCre8 — main.js  v1.10.4
+   Built on: v1.10.3
 
    What's new:
-   - Results tile: removed per-link "Embed" + iframes (cleaner)
-   - Travel normalization: respects explicit non-UK countries
+   - Maps tile centers on the country in the query (France, Spain, …)
+     using a built-in country → lat/lng/zoom hint (no Google API key).
+   - Assistant chat now sends recent history to /api/ai-chat (POST)
+     so replies use prior context.
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -13,7 +15,7 @@ const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
 const K_PREFS      = "lifecre8.prefs";
-const DATA_VERSION = 7;
+const DATA_VERSION = 8;
 
 /* ===== Presets ===== */
 const RSS_PRESETS = {
@@ -63,10 +65,7 @@ const $$ = q => Array.from(document.querySelectorAll(q));
 const uid   = () => Math.random().toString(36).slice(2);
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
-const favOf  = (u) => {
-  const h = hostOf(u);
-  return h ? `https://www.google.com/s2/favicons?domain=${h}&sz=32` : "";
-};
+const favOf  = (u) => { const h = hostOf(u); return h ? `https://www.google.com/s2/favicons?domain=${h}&sz=32` : ""; };
 
 const appEl = document.querySelector(".app");
 
@@ -110,44 +109,6 @@ function ytPlaylistMarkup(playlist, currentId) {
 }
 
 /* -----------------------------
-   Web tile (generic)
------------------------------ */
-function webTileMarkup(url, mode = "preview") {
-  const host = hostOf(url);
-  const favicon = favOf(url);
-  if (mode === "embed") {
-    return `
-      <div class="web-tile" data-web data-url="${url}" data-mode="embed">
-        <div class="web-actions">
-          <button class="btn sm web-toggle" data-mode="preview">Preview</button>
-          <a class="btn sm" href="${url}" target="_blank" rel="noopener">Open</a>
-        </div>
-        <iframe src="${url}" style="width:100%;height:300px;border:0;border-radius:10px;background:#0a1522"></iframe>
-        <div class="muted">If this is blank, the site likely blocks iframes. Use Preview/Open.</div>
-      </div>
-    `;
-  }
-  return `
-    <div class="web-tile" data-web data-url="${url}" data-mode="preview">
-      <div class="web-preview">
-        <div class="web-header">
-          <img class="web-favicon" src="${favicon}" alt="">
-          <div>
-            <div class="web-title">${host || url}</div>
-            <div class="web-host">${url}</div>
-          </div>
-        </div>
-        <div class="web-actions">
-          <button class="btn sm web-toggle" data-mode="embed">Embed</button>
-          <a class="btn sm" href="${url}" target="_blank" rel="noopener">Open</a>
-        </div>
-        <div class="muted" style="margin-top:6px">Preview mode avoids iframe blocks. Try Embed; if it fails, use Open.</div>
-      </div>
-    </div>
-  `;
-}
-
-/* -----------------------------
    Results tile (clean link cards, no embeds)
 ----------------------------- */
 function resultsTileMarkup(q, items) {
@@ -179,13 +140,66 @@ function resultsTileMarkup(q, items) {
 }
 
 /* -----------------------------
-   Maps tile (travel intent)
+   Country center hints (lat,lng,zoom)
+   — lightweight centering without a Maps API key
+----------------------------- */
+const COUNTRY_CENTER = {
+  "united kingdom": { lat: 54.3, lng: -2.3, z: 5 },
+  "england":        { lat: 52.3, lng: -1.6, z: 6 },
+  "scotland":       { lat: 56.8, lng: -4.2, z: 6 },
+  "wales":          { lat: 52.4, lng: -3.6, z: 6 },
+  "northern ireland": { lat: 54.6, lng: -6.7, z: 7 },
+
+  "france":   { lat: 46.2, lng: 2.2,   z: 5 },
+  "spain":    { lat: 40.2, lng: -3.6,  z: 5 },
+  "italy":    { lat: 42.5, lng: 12.5,  z: 5 },
+  "germany":  { lat: 51.2, lng: 10.4,  z: 5 },
+  "portugal": { lat: 39.7, lng: -8.0,  z: 6 },
+  "switzerland": { lat: 46.8, lng: 8.2, z: 6 },
+  "austria":  { lat: 47.6, lng: 14.1, z: 6 },
+  "greece":   { lat: 39.1, lng: 22.9, z: 6 },
+  "netherlands": { lat: 52.2, lng: 5.3, z: 6 },
+  "belgium":  { lat: 50.8, lng: 4.5,  z: 7 },
+  "ireland":  { lat: 53.3, lng: -8.0, z: 6 },
+  "usa":      { lat: 39.7, lng: -98.6, z: 4 },
+  "united states": { lat: 39.7, lng: -98.6, z: 4 },
+  "canada":   { lat: 56.1, lng: -106.3, z: 3 },
+  "mexico":   { lat: 23.6, lng: -102.6, z: 4 },
+  "japan":    { lat: 36.2, lng: 138.3, z: 5 },
+  "australia":{ lat: -25.3, lng: 133.8, z: 4 },
+  "new zealand": { lat: -41.3, lng: 174.7, z: 5 }
+};
+
+function countryCenterFromQuery(q) {
+  const s = (q || "").toLowerCase();
+  // Prefer full country match first
+  for (const name of Object.keys(COUNTRY_CENTER)) {
+    if (s.includes(name)) return COUNTRY_CENTER[name];
+  }
+  return null;
+}
+
+/* -----------------------------
+   Maps tile (travel intent) — centered
 ----------------------------- */
 function mapsTileMarkup(query){
-  const embed   = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
-  const open    = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
+  // Center on a detected country, otherwise let Maps decide.
+  const hint = countryCenterFromQuery(query);
+  const base = `https://www.google.com/maps`;
+  let embed;
+
+  if (hint) {
+    // Older Maps embed parameters that most browsers still honor:
+    // q=... sets the search; ll + z define the initial view.
+    embed = `${base}?q=${encodeURIComponent(query)}&ll=${hint.lat},${hint.lng}&z=${hint.z}&output=embed`;
+  } else {
+    embed = `${base}?q=${encodeURIComponent(query)}&output=embed`;
+  }
+
+  const open    = `${base}/search/${encodeURIComponent(query)}`;
   const booking = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(query)}`;
   const trip    = `https://www.tripadvisor.com/Search?q=${encodeURIComponent(query)}`;
+
   return `
     <div data-maps>
       <div class="web-actions" style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap">
@@ -198,13 +212,13 @@ function mapsTileMarkup(query){
   `;
 }
 
-/* ---- Travel query normalization (client copy) ---- */
+/* ---- Travel query normalization ---- */
 function normalizeTravelQuery(val){
   const raw = (val || "").trim();
   if (!raw) return raw;
   if (/\bnear me\b/i.test(raw)) return raw;
 
-  // If any non-UK country is explicitly mentioned, don't alter it.
+  // If any non-UK country is mentioned, do not append "United Kingdom".
   const NON_UK_COUNTRIES =
     /\b(france|spain|italy|germany|portugal|switzerland|austria|greece|croatia|turkey|netherlands|belgium|ireland(?!\s*northern)|iceland|norway|sweden|denmark|finland|poland|czech|hungary|romania|bulgaria|slovenia|slovakia|estonia|latvia|lithuania|canada|mexico|united states|usa|brazil|argentina|chile|peru|japan|south korea|korea|china|india|thailand|vietnam|indonesia|malaysia|singapore|australia|new zealand|morocco|egypt|south africa|uae|dubai|qatar)\b/i;
   if (NON_UK_COUNTRIES.test(raw)) return raw;
@@ -351,7 +365,7 @@ function footballMarkupSeed() {
 }
 
 /* -----------------------------
-   Defaults
+   Defaults / seed
 ----------------------------- */
 function gallerySeed() {
   return [
@@ -391,6 +405,41 @@ function ensureVersion() {
 /* -----------------------------
    Rendering
 ----------------------------- */
+function webTileMarkup(url, mode = "preview") {
+  const host = hostOf(url);
+  const favicon = favOf(url);
+  if (mode === "embed") {
+    return `
+      <div class="web-tile" data-web data-url="${url}" data-mode="embed">
+        <div class="web-actions">
+          <button class="btn sm web-toggle" data-mode="preview">Preview</button>
+          <a class="btn sm" href="${url}" target="_blank" rel="noopener">Open</a>
+        </div>
+        <iframe src="${url}" style="width:100%;height:300px;border:0;border-radius:10px;background:#0a1522"></iframe>
+        <div class="muted">If this is blank, the site likely blocks iframes. Use Preview/Open.</div>
+      </div>
+    `;
+  }
+  return `
+    <div class="web-tile" data-web data-url="${url}" data-mode="preview">
+      <div class="web-preview">
+        <div class="web-header">
+          <img class="web-favicon" src="${favicon}" alt="">
+          <div>
+            <div class="web-title">${host || url}</div>
+            <div class="web-host">${url}</div>
+          </div>
+        </div>
+        <div class="web-actions">
+          <button class="btn sm web-toggle" data-mode="embed">Embed</button>
+          <a class="btn sm" href="${url}" target="_blank" rel="noopener">Open</a>
+        </div>
+        <div class="muted" style="margin-top:6px">Preview mode avoids iframe blocks. Try Embed; if it fails, use Open.</div>
+      </div>
+    </div>
+  `;
+}
+
 function tileContentFor(section) {
   switch (section.type) {
     case "youtube": {
@@ -411,11 +460,6 @@ function tileContentFor(section) {
       const q = section.meta?.q || "";
       const items = section.meta?.items || [];
       return resultsTileMarkup(q, items);
-    }
-    case "spotify": {
-      const url = section.meta?.url || "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M";
-      const src = url.replace("open.spotify.com/", "open.spotify.com/embed/");
-      return `<iframe style="border-radius:12px" src="${src}" width="100%" height="232" frameborder="0" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"></iframe>`;
     }
     case "rss": return section.content || rssLoadingMarkup();
     case "gallery": return galleryMarkup(section.meta?.urls || []);
@@ -463,7 +507,7 @@ function render() {
 }
 
 /* -----------------------------
-   Delegated handlers
+   Delegated handlers (expand/remove/settings etc.)
 ----------------------------- */
 (function attachDelegatesOnce(){
   const grid = $("#grid");
@@ -598,7 +642,7 @@ function render() {
     const s = sections.find(x => x.id === id);
     if (!s) return;
     const url = tile.dataset.url;
-    const nextMode = toggle.dataset.mode; // "embed" or "preview"
+    const nextMode = toggle.dataset.mode;
     s.meta = s.meta || {};
     s.meta.url = url;
     s.meta.mode = nextMode;
@@ -765,7 +809,7 @@ function renderTicker(card, prices, prev){
 }
 
 /* -----------------------------
-   Add Tile — AI-first (multi-result)
+   Add Tile — AI-first (multi-result + travel)
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
@@ -787,7 +831,7 @@ tileSearch?.addEventListener("keydown", (e)=>{
   const val = valRaw.replace(/\s+/g, " ");
   let newTile = null;
 
-  /* Travel intent → Maps */
+  // Travel intent → Maps
   const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|holidays|getaway|staycation|weekend)/i;
   const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
   if (TRAVEL_RE.test(val) || GEO_HINT.test(val)) {
@@ -801,14 +845,14 @@ tileSearch?.addEventListener("keydown", (e)=>{
     };
   }
 
-  /* URL → Web */
+  // URL → Web
   const isUrl = /^https?:\/\//i.test(val);
   if (!newTile && isUrl) {
     const url = val;
     newTile = { id: uid(), type:"web", title: new URL(val).hostname, meta:{ url, mode:"preview" }, content: webTileMarkup(url, "preview") };
   }
 
-  // If still no tile, ask the AI multi-result endpoint
+  // AI multi-result endpoint
   const goAi = async () => {
     try {
       const r = await fetch(`/api/ai-tile?q=${encodeURIComponent(val)}&region=GB`);
@@ -827,7 +871,6 @@ tileSearch?.addEventListener("keydown", (e)=>{
       tileMenu.classList.add("hidden");
       tileSearch.value = "";
     } catch {
-      // Fallback: RSS search
       const gn  = `https://news.google.com/rss/search?q=${encodeURIComponent(val)}&hl=en-GB&gl=GB&ceid=GB:en`;
       const s = { id: uid(), type:"rss", title:`Daily Brief — ${val}`, meta:{ feeds:[gn] }, content: rssLoadingMarkup() };
       sections.unshift(s);
@@ -850,7 +893,7 @@ tileSearch?.addEventListener("keydown", (e)=>{
 });
 
 /* -----------------------------
-   Assistant Toggle & Chat (standalone)
+   Assistant Toggle & Chat (standalone, multi-turn)
 ----------------------------- */
 const assistantToggle = $("#assistantToggle");
 const assistantPanel  = $("#assistantPanel");
@@ -895,7 +938,13 @@ chatForm?.addEventListener("submit", async (e)=>{
   addChat('user', text);
   chatInput.value = "";
   try {
-    const r = await fetch(`/api/ai-chat?q=${encodeURIComponent(text)}`);
+    // Send recent history (last 12) to the server
+    const recent = chat.slice(-12);
+    const r = await fetch(`/api/ai-chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: recent })
+    });
     if (!r.ok) throw new Error("chat endpoint not available");
     const j = await r.json();
     addChat('ai', j.message || "…");
@@ -905,7 +954,7 @@ chatForm?.addEventListener("submit", async (e)=>{
 });
 
 /* -----------------------------
-   Global settings (Top button)
+   Global settings & Modals (unchanged)
 ----------------------------- */
 $("#globalSettingsBtn")?.addEventListener("click", ()=>{
   const html = `
@@ -950,9 +999,6 @@ $("#globalSettingsBtn")?.addEventListener("click", ()=>{
   }, { once:true });
 });
 
-/* -----------------------------
-   Modal helpers
------------------------------ */
 (function modalSafetyNet(){
   const modal = document.getElementById('modal');
   const backdrop = document.getElementById('fsBackdrop');
