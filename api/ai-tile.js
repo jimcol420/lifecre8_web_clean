@@ -1,178 +1,212 @@
-// /api/ai-tile.js
-// Edge function that converts a free-form query into ONE tile plan.
+// api/ai-tile.js
+// Edge API — returns a *single* tile plan for the Add Tile box.
+// Types returned:
+//  - { type:"maps", title, q, related: [{title,url,kind}] }
+//  - { type:"results", title, items: [{title,url,kind}] }
 
 export const config = { runtime: "edge" };
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPEN_API_KEY;
 
-function json(res, status = 200) {
-  return new Response(JSON.stringify(res), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
+// --- Demonyms → Countries (longest first) ---
+const DEMONYMS = Object.entries({
+  "south african": "South Africa",
+  argentinian: "Argentina",
+  british: "United Kingdom",
+  english: "England",
+  scottish: "Scotland",
+  welsh: "Wales",
+  irish: "Ireland",
+  french: "France",
+  spanish: "Spain",
+  italian: "Italy",
+  german: "Germany",
+  portuguese: "Portugal",
+  greek: "Greece",
+  turkish: "Turkey",
+  dutch: "Netherlands",
+  swiss: "Switzerland",
+  austrian: "Austria",
+  norwegian: "Norway",
+  swedish: "Sweden",
+  danish: "Denmark",
+  finnish: "Finland",
+  icelandic: "Iceland",
+  moroccan: "Morocco",
+  egyptian: "Egypt",
+  japanese: "Japan",
+  korean: "Korea",
+  vietnamese: "Vietnam",
+  indonesian: "Indonesia",
+  malaysian: "Malaysia",
+  thai: "Thailand",
+  australian: "Australia",
+  "new zealand": "New Zealand",
+  polish: "Poland",
+  czech: "Czechia",
+  hungarian: "Hungary",
+  croatian: "Croatia",
+  canadian: "Canada",
+  american: "United States",
+  chilean: "Chile",
+  brazilian: "Brazil",
+  indian: "India",
+}).sort((a, b) => b[0].length - a[0].length); // match longest first
 
-/* ---------------- Demonyms + helpers ---------------- */
-const DEMONYMS = {
-  "british":"United Kingdom","english":"England","scottish":"Scotland","welsh":"Wales","irish":"Ireland",
-  "french":"France","spanish":"Spain","italian":"Italy","german":"Germany","portuguese":"Portugal",
-  "thai":"Thailand","greek":"Greece","turkish":"Turkey","dutch":"Netherlands","swiss":"Switzerland",
-  "austrian":"Austria","norwegian":"Norway","swedish":"Sweden","danish":"Denmark","finnish":"Finland",
-  "icelandic":"Iceland","moroccan":"Morocco","egyptian":"Egypt","japanese":"Japan","korean":"Korea",
-  "vietnamese":"Vietnam","indonesian":"Indonesia","malaysian":"Malaysia","australian":"Australia",
-  "new zealand":"New Zealand","polish":"Poland","czech":"Czechia","hungarian":"Hungary","croatian":"Croatia",
-  "canadian":"Canada","american":"United States","chilean":"Chile","argentinian":"Argentina","brazilian":"Brazil",
-  "south african":"South Africa","indian":"India"
-};
+const TRAVEL_WORDS =
+  /\b(holiday|holidays|break|breaks|trip|trips|ideas|itinerary|staycation|weekend|getaway|getaways|resort|hotel|hostel|villa|air\s*bnb|airbnb|guesthouse|camp|camping|lodg(e|ing)|yoga|spa|retreat|beach|city\s*break|things to do|attractions|safari|trek|national park|wildlife)\b/i;
 
-function demonymToCountry(text){
+const HOWTO_WORDS =
+  /\b(how to|how do i|guide|tutorial|plans|blueprint|build|make|craft|step[-\s]?by[-\s]?step|instructions)\b/i;
+
+const NEAR_ME = /\bnear me\b/i;
+
+function demonymToCountry(text) {
   const l = text.toLowerCase();
-  const keys = Object.keys(DEMONYMS).sort((a,b)=>b.length-a.length);
-  for (const k of keys) if (l.includes(k)) return DEMONYMS[k];
+  for (const [dem, country] of DEMONYMS) {
+    if (l.includes(dem)) return country;
+  }
   return null;
 }
 
-const ACTIVITY_HINTS = [
-  "holiday ideas","holidays","trip","trips","getaway","getaways","weekend",
-  "things to do","attractions","resort","resorts","hotel","hotels",
-  "villa","villas","beach","beaches","city break","city breaks",
-  // safari-ish
-  "safari","tiger safari","wildlife","national park","game drive","trek","trekking","hiking"
-];
-
-function extractActivities(qLower){
-  const hits = [];
-  for (const a of ACTIVITY_HINTS) {
-    if (qLower.includes(a)) hits.push(a);
-  }
-  // promote tiger -> tiger safari
-  if (qLower.includes("tiger") && !hits.some(x=>x.includes("tiger"))) hits.push("tiger safari");
-  if (qLower.includes("safari") && !hits.includes("safari")) hits.push("safari");
-  if (qLower.includes("trek")) hits.push("trek");
-  return Array.from(new Set(hits));
+function isBarePlace(text) {
+  // short place-ish string (e.g., "Argentina", "French Riviera")
+  const words = text.trim().split(/\s+/);
+  return /^[a-z0-9\s'.,-]+$/i.test(text) && words.length <= 3;
 }
 
-function looksLikeOnlyPlace(text){
-  return /^[a-z0-9\s'.,-]+$/i.test(text) && text.trim().split(/\s+/).length <= 3;
-}
+function normaliseTravelQuery(input) {
+  let q = input.trim();
+  if (!q) return q;
+  if (NEAR_ME.test(q)) return q; // don't add country hints
 
-function buildSpecificMapsQuery(original) {
-  const raw = (original || "").trim();
-  const lower = raw.toLowerCase();
-  const country = demonymToCountry(raw);
-  const acts = extractActivities(lower);
-
-  let base = raw;
-  if (country && !new RegExp(`\\b${country}\\b`, "i").test(raw)) base = `${raw} ${country}`;
-
-  // If user gave only a place name, add a meaningful hint
-  if (looksLikeOnlyPlace(base) && acts.length === 0) acts.push("holiday ideas");
-
-  // Compose
-  const hint = acts.join(" ");
-  const out = hint ? `${base} ${hint}` : base;
-
-  return out.trim().replace(/\s+/g, " ");
-}
-
-function isGeneric(str){
-  const s = (str || "").toLowerCase().trim();
-  if (!s) return true;
-  if (s.length < 6) return true;
-  return ["holiday ideas","ideas","holidays","trip","trips","getaway","getaways","weekend"]
-    .includes(s);
-}
-
-/* ---------------- OpenAI call ---------------- */
-async function callOpenAI(prompt) {
-  if (!OPENAI_API_KEY) {
-    // demo
-    return {
-      type: "rss",
-      title: `Daily Brief — ${prompt.slice(0, 32)}`.trim(),
-      feeds: [
-        `https://news.google.com/rss/search?q=${encodeURIComponent(prompt)}&hl=en-GB&gl=GB&ceid=GB:en`
-      ]
-    };
+  // demonym → country (do NOT add UK default if we found a country)
+  const country = demonymToCountry(q);
+  if (country && !new RegExp(`\\b${country}\\b`, "i").test(q)) {
+    q = `${q} ${country}`;
   }
 
-  const sys = [
-    "You map a short user query to ONE dashboard tile.",
-    "Return STRICT JSON only. No prose.",
-    "Allowed types: maps | web | youtube | rss | gallery | stocks",
-    "",
-    "Schemas:",
-    "- maps:   {type, title, q}",
-    "- web:    {type, title, url}",
-    "- youtube:{type, title, playlist:[videoId,...]}",
-    "- rss:    {type, title, feeds:[url,...]}",
-    "- gallery:{type, title, images:[url,...]}",
-    "- stocks: {type, title, symbols:[\"AAPL\",\"MSFT\",...]}",
-    "",
-    "Guidance:",
-    "- Travel words (holiday, safari, trek, villa, beach, city break, things to do, etc.) → maps.",
-    "- Respect demonyms: French→France, Indian→India, South African→South Africa.",
-    "- Keep titles short.",
-  ].join("\n");
+  // If it's only a place name, give Maps a helpful topic
+  if (isBarePlace(q) && !/\b(holiday|trip|ideas|attractions|things to do|safari|trek|villa|beach|resort)\b/i.test(q)) {
+    q = `${q} holiday ideas`;
+  }
 
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+  // Safari / trek: strengthen query to avoid world map
+  if (/\b(safari|tiger|wildlife|game drive|trek)\b/i.test(input)) {
+    // try to retrieve the country we inferred (or default to input)
+    const c = country || input;
+    q = `${c} safari trek national parks wildlife holiday ideas`.trim();
+  }
+
+  return q;
+}
+
+function relatedForMaps(q) {
+  const g = `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+  const yt = `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}`;
+  const wikiSeed = q.replace(/(holiday ideas|things to do|attractions|resort|hotel|villa)/gi, "").trim();
+  const wk = `https://en.wikipedia.org/wiki/Special:Search?search=${encodeURIComponent(wikiSeed)}`;
+  return [
+    { kind: "search", title: "Top results on Google", url: g },
+    { kind: "youtube", title: "Watch on YouTube", url: yt },
+    { kind: "wiki", title: "Wikipedia overview", url: wk },
+  ];
+}
+
+function resultsForGeneric(query) {
+  // Curated high-signal jump-offs (no scraping needed)
+  const g = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+  const yt = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+  const wk = `https://en.wikipedia.org/wiki/Special:Search?search=${encodeURIComponent(query)}`;
+  return [
+    { kind: "youtube", title: "Watch on YouTube", url: yt },
+    { kind: "guide", title: "Top results on Google", url: g },
+    { kind: "wiki", title: "Wikipedia overview", url: wk },
+  ];
+}
+
+async function llmSuggestPlan(text) {
+  // Optional: let the model refine the intent (kept conservative).
+  const key = OPENAI_API_KEY;
+  if (!key) return null;
+  const prompt = [
+    { role: "system", content: "You return one JSON object. Detect if a user's query is TRAVEL or HOWTO. Reply with {intent:'travel'|'howto'|'generic', topic:string}. Be conservative. No prose." },
+    { role: "user", content: text },
+  ];
+  const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0.2,
-      messages: [
-        { role: "system", content: sys },
-        { role: "user", content: prompt }
-      ],
-      response_format: { type: "json_object" }
-    })
-  });
-
-  if (!res.ok) {
-    const txt = await res.text().catch(()=> "");
-    throw new Error(`OpenAI failed: ${txt}`);
-  }
-  const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content || "{}";
-  let parsed;
-  try { parsed = JSON.parse(content); } catch { parsed = {}; }
-  return parsed;
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "gpt-4o-mini", messages: prompt, temperature: 0 }),
+  }).catch(() => null);
+  if (!r || !r.ok) return null;
+  const j = await r.json().catch(() => null);
+  const content = j?.choices?.[0]?.message?.content ?? "";
+  try {
+    const obj = JSON.parse(content);
+    if (obj && typeof obj === "object") return obj;
+  } catch {}
+  return null;
 }
 
-/* ---------------- Handler ---------------- */
 export default async function handler(req) {
   try {
-    const url = new URL(req.url);
-    const q = (req.method === "GET")
-      ? (url.searchParams.get("q") || "")
-      : ((await req.json()).q || "");
+    const { searchParams } = new URL(req.url);
+    const q = (searchParams.get("q") || "").trim();
 
-    const prompt = q.trim();
-    if (!prompt) return json({ error: "Missing q" }, 400);
-
-    // Prefer a specific maps string up front for travel-like queries
-    const travelish = /\b(holiday|holidays|getaway|getaways|trip|trips|weekend|resort|hotel|hostel|bnb|city\s*break|safari|tiger|wildlife|trek|hiking|beach|villa|things to do|attractions|national park)\b/i.test(prompt)
-      || /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i.test(prompt);
-
-    const preMapsQ = travelish ? buildSpecificMapsQuery(prompt) : prompt;
-
-    // Ask the model to choose the tile
-    let plan = await callOpenAI(preMapsQ);
-
-    // Server-side hardening:
-    if (plan?.type === "maps") {
-      // ensure q is specific and non-generic
-      const qCandidate = plan.q && !isGeneric(plan.q) ? plan.q : preMapsQ;
-      plan.q = isGeneric(qCandidate) ? buildSpecificMapsQuery(prompt) : qCandidate;
-      if (!plan.title) plan.title = `Search — ${prompt}`;
+    if (!q) {
+      return new Response(
+        JSON.stringify({ tile: { type: "results", title: "Results — (empty)", items: [] } }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
     }
 
-    return json({ tile: plan });
-  } catch (e) {
-    return json({ error: String(e) }, 500);
+    // 1) Heuristics first
+    const looksTravel = TRAVEL_WORDS.test(q) || demonymToCountry(q);
+    const looksHowTo = HOWTO_WORDS.test(q);
+
+    // 2) Optional LLM nudge (only to refine)
+    let llm = null;
+    try {
+      llm = await llmSuggestPlan(q);
+    } catch {}
+
+    const intent =
+      (llm?.intent === "travel" && "travel") ||
+      (llm?.intent === "howto" && "howto") ||
+      (llm?.intent === "generic" && "generic") ||
+      (looksTravel ? "travel" : looksHowTo ? "howto" : "generic");
+
+    if (intent === "travel") {
+      const nq = normaliseTravelQuery(q);
+      return new Response(
+        JSON.stringify({
+          tile: {
+            type: "maps",
+            title: `Search — ${q}`,
+            q: nq,
+            related: relatedForMaps(nq),
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // howto/generic → results list (multi-link, no iframes)
+    const items = resultsForGeneric(q);
+    return new Response(
+      JSON.stringify({
+        tile: {
+          type: "results",
+          title: q.replace(/^([a-z])/i, (m) => m.toUpperCase()),
+          items,
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    return new Response(JSON.stringify({ error: String(err) }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 }
