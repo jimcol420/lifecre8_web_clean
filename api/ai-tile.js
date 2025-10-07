@@ -1,164 +1,146 @@
-// api/ai-tile.js
-// Purpose: Given a free-form query, return ONE tile plan the client can render.
-// Supports: maps (travel intent), rss, web, youtube, gallery.
-// Uses demonym → country mapping & normalizes travel queries, mirroring client logic.
+// /api/ai-tile.js
+// Edge function that turns a free-form query into a concrete tile plan.
+// It returns a single tile JSON the client can render immediately.
 
-export default async function handler(req, res) {
-  try {
-    const { q = "" } = req.query;
-    const query = String(q || "").trim();
-    if (!query) return res.status(400).json({ error: "missing q" });
+export const config = { runtime: "edge" };
 
-    // 1) Travel intent (server-side mirror)
-    const DEMONYMS = {
-      "british":"United Kingdom","english":"England","scottish":"Scotland","welsh":"Wales","irish":"Ireland",
-      "french":"France","spanish":"Spain","italian":"Italy","german":"Germany","portuguese":"Portugal",
-      "thai":"Thailand","greek":"Greece","turkish":"Turkey","dutch":"Netherlands","swiss":"Switzerland",
-      "austrian":"Austria","norwegian":"Norway","swedish":"Sweden","danish":"Denmark","finnish":"Finland",
-      "icelandic":"Iceland","moroccan":"Morocco","egyptian":"Egypt","japanese":"Japan","korean":"Korea",
-      "vietnamese":"Vietnam","indonesian":"Indonesia","malaysian":"Malaysia","australian":"Australia",
-      "new zealand":"New Zealand","polish":"Poland","czech":"Czechia","hungarian":"Hungary","croatian":"Croatia",
-      "canadian":"Canada","american":"United States","chilean":"Chile","argentinian":"Argentina","brazilian":"Brazil"
-    };
-    function demonymToCountry(text){
-      const l = text.toLowerCase();
-      const keys = Object.keys(DEMONYMS).sort((a,b)=>b.length-a.length);
-      for (const k of keys) if (l.includes(k)) return DEMONYMS[k];
-      return null;
-    }
-    function normalizeTravelQuery(val){
-      const raw = (val || "").trim();
-      if (!raw) return raw;
-      if (/\bnear me\b/i.test(raw)) return raw;
-      if (/\b(in|near|around)\s+[A-Za-z][\w\s'-]+$/i.test(raw)) return raw;
-      if (/\b(uk|u\.k\.|united kingdom|england|scotland|wales|northern ireland)\b/i.test(raw) && !/united kingdom/i.test(raw)) {
-        return `${raw} United Kingdom`;
-      }
-      const c = demonymToCountry(raw);
-      if (c && !new RegExp(c, "i").test(raw)) return `${raw} ${c}`;
-      if (/\b(holiday|holidays|break|breaks|trip|trips|ideas|getaway|getaways|staycation|weekend)\b/i.test(raw)) {
-        return `${raw} United Kingdom`;
-      }
-      return raw;
-    }
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPEN_API_KEY;
 
-    const TRAVEL_RE = /(retreat|spa|resort|hotel|hostel|air\s*bnb|airbnb|villa|wellness|yoga|camp|lodg(e|ing)|stay|bnb|guesthouse|inn|aparthotel|boutique|residence|beach\s*resort|city\s*break|holiday|getaway|staycation|weekend|canal\s*boat|river\s*cruise|self\s*catering|villas?)/i;
-    const GEO_HINT  = /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i;
+// --- helpers ---------------------------------------------------------------
 
-    if (TRAVEL_RE.test(query) || GEO_HINT.test(query) || demonymToCountry(query)) {
-      const qn = normalizeTravelQuery(query);
-      return res.status(200).json({
-        type: "maps",
-        title: `Search — ${query}`,
-        q: qn
-      });
-    }
+function json(res, status = 200) {
+  return new Response(JSON.stringify(res), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
-    // 2) Heuristics before LLM: YouTube links
-    const yt = query.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([A-Za-z0-9_\-]+)/i);
-    if (yt) {
-      const id = yt[1];
-      return res.status(200).json({
-        type: "youtube",
-        title: "YouTube",
-        playlist: [id]
-      });
-    }
+const DEMONYMS = {
+  "british":"United Kingdom","english":"England","scottish":"Scotland","welsh":"Wales","irish":"Ireland",
+  "french":"France","spanish":"Spain","italian":"Italy","german":"Germany","portuguese":"Portugal",
+  "thai":"Thailand","greek":"Greece","turkish":"Turkey","dutch":"Netherlands","swiss":"Switzerland",
+  "austrian":"Austria","norwegian":"Norway","swedish":"Sweden","danish":"Denmark","finnish":"Finland",
+  "icelandic":"Iceland","moroccan":"Morocco","egyptian":"Egypt","japanese":"Japan","korean":"Korea",
+  "vietnamese":"Vietnam","indonesian":"Indonesia","malaysian":"Malaysia","australian":"Australia",
+  "new zealand":"New Zealand","polish":"Poland","czech":"Czechia","hungarian":"Hungary","croatian":"Croatia",
+  "canadian":"Canada","american":"United States","chilean":"Chile","argentinian":"Argentina","brazilian":"Brazil",
+  "south african":"South Africa"
+};
 
-    // 3) URL → Web
-    if (/^https?:\/\//i.test(query)) {
-      return res.status(200).json({
-        type: "web",
-        title: "Web",
-        url: query
-      });
-    }
+function demonymToCountry(text){
+  const l = text.toLowerCase();
+  const keys = Object.keys(DEMONYMS).sort((a,b)=>b.length-a.length);
+  for (const k of keys) if (l.includes(k)) return DEMONYMS[k];
+  return null;
+}
 
-    // 4) Ask OpenAI to design ONE tile plan
-    const key = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
-    if (!key) {
-      // graceful fallback → RSS for topic
-      return res.status(200).json({
-        type: "rss",
-        title: `Daily Brief — ${query}`,
-        feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-GB&gl=GB&ceid=GB:en`]
-      });
-    }
+function normalizeTravelQuery(q) {
+  const raw = (q || "").trim();
+  if (!raw) return raw;
 
-    // Small, deterministic prompt to keep responses consistent
-    const system = [
-      "You are a tile planner for a dashboard.",
-      "Given a user query, output exactly ONE tile plan as strict JSON.",
-      "Types allowed: maps(web search phrase), web(url), rss([feedUrls]), youtube([videoIds]), gallery([imageUrls]).",
-      "Prefer maps for travel/lodging/places. Prefer rss for topical newsy themes.",
-      "Never output markdown. Only raw JSON."
-    ].join(" ");
+  // "south african safari" -> "... South Africa"
+  const country = demonymToCountry(raw);
+  let out = raw;
+  if (country && !new RegExp(`\\b${country}\\b`, "i").test(raw)) out = `${raw} ${country}`;
 
-    const user = JSON.stringify({
-      query,
-      examples: [
-        { q: "thai beachfront holiday villas", plan: { type:"maps", q:"thai beachfront holiday villas Thailand" } },
-        { q: "chocolate cake recipes", plan: { type:"web", url:"https://www.seriouseats.com/chocolate-cake-recipes" } },
-        { q: "football fixtures today", plan: { type:"rss", feeds:["https://feeds.bbci.co.uk/sport/football/rss.xml"] } }
-      ]
-    });
+  // Bare place name → add useful hint so Maps isn't world-zoomed
+  const looksLikeOnlyPlace = /^[a-z0-9\s'.,-]+$/i.test(out) && out.trim().split(/\s+/).length <= 3;
+  if (looksLikeOnlyPlace && !/\b(holiday|trip|ideas|things to do|attractions|safari|beach|villa|resort|hotel)\b/i.test(out)) {
+    out = `${out} holiday ideas`;
+  }
+  return out;
+}
 
-    // Use OpenAI responses API (compatible fetch)
-    const resp = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: { "Content-Type":"application/json", "Authorization":`Bearer ${key}` },
-      body: JSON.stringify({
-        model: "gpt-4.1-mini",
-        input: [{ role:"system", content:system }, { role:"user", content:user }],
-        max_output_tokens: 400,
-        temperature: 0.2
-      })
-    });
+// --- OpenAI call -----------------------------------------------------------
 
-    if (!resp.ok) {
-      // fallback to topic RSS
-      return res.status(200).json({
-        type: "rss",
-        title: `Daily Brief — ${query}`,
-        feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-GB&gl=GB&ceid=GB:en`]
-      });
-    }
-
-    const data = await resp.json();
-    // Attempt to parse JSON from output_text
-    const raw = data?.output_text || "";
-    let plan = null;
-    try {
-      plan = JSON.parse(raw);
-    } catch {
-      // loose regex for JSON object
-      const m = raw.match(/\{[\s\S]*\}/);
-      if (m) { try { plan = JSON.parse(m[0]); } catch {} }
-    }
-
-    if (!plan || typeof plan !== "object") {
-      return res.status(200).json({
-        type: "rss",
-        title: `Daily Brief — ${query}`,
-        feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-GB&gl=GB&ceid=GB:en`]
-      });
-    }
-
-    // Normalize maps q with demonyms if present
-    if (plan.type === "maps" && plan.q) {
-      plan.q = normalizeTravelQuery(plan.q);
-    } else if (plan.type === "maps" && !plan.q) {
-      plan.q = normalizeTravelQuery(query);
-    }
-
-    return res.status(200).json(plan);
-  } catch (err) {
-    // Last-resort fallback → topic RSS
-    const q = String(req.query?.q || "").trim() || "news";
-    return res.status(200).json({
+async function callOpenAI(prompt) {
+  if (!OPENAI_API_KEY) {
+    // demo response to avoid hard-failing locally
+    return {
       type: "rss",
-      title: `Daily Brief — ${q}`,
-      feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`]
-    });
+      title: `Daily Brief — ${prompt.slice(0, 32)}`.trim(),
+      feeds: [
+        `https://news.google.com/rss/search?q=${encodeURIComponent(prompt)}&hl=en-GB&gl=GB&ceid=GB:en`
+      ]
+    };
+  }
+
+  const sys = [
+    "You are an agent that maps a user's short query to ONE dashboard tile.",
+    "Return STRICT JSON with keys appropriate to the chosen type, no commentary.",
+    "TYPES you may choose: maps | web | youtube | rss | gallery | stocks",
+    "",
+    "Schemas:",
+    "- maps:   {type, title, q}",
+    "- web:    {type, title, url}",
+    "- youtube:{type, title, playlist:[videoId,...]}",
+    "- rss:    {type, title, feeds:[url,...]}",
+    "- gallery:{type, title, images:[url,...]}",
+    "- stocks: {type, title, symbols:[\"AAPL\",\"MSFT\",...]}",
+    "",
+    "Rules:",
+    "- For travel (holiday, getaway, safari, villa, beach, city break, etc.) choose 'maps'.",
+    "- Use demonyms: 'South African' -> 'South Africa', 'French' -> 'France', etc.",
+    "- If the user just gives a place name (e.g., 'Argentina'), append a useful hint like 'holiday ideas'.",
+    "- For how-to, 'why do', or topic queries with no clear site → choose 'rss' using a Google News query.",
+    "- For explicit URLs, choose 'web' and pass the URL.",
+    "- For 'YouTube' words or youtu* links → 'youtube' and include a small playlist (IDs only).",
+    "- Keep titles short, sentence case.",
+  ].join("\n");
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      messages: [
+        { role: "system", content: sys },
+        { role: "user", content: prompt }
+      ],
+      response_format: { type: "json_object" }
+    })
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(()=> "");
+    throw new Error(`OpenAI failed: ${txt}`);
+  }
+  const data = await res.json();
+  const content = data?.choices?.[0]?.message?.content || "{}";
+  let parsed;
+  try { parsed = JSON.parse(content); } catch { parsed = {}; }
+  return parsed;
+}
+
+// --- handler ---------------------------------------------------------------
+
+export default async function handler(req) {
+  try {
+    const url = new URL(req.url);
+    const q = (req.method === "GET")
+      ? (url.searchParams.get("q") || "")
+      : ((await req.json()).q || "");
+
+    const prompt = q.trim();
+    if (!prompt) return json({ error: "Missing q" }, 400);
+
+    // quick pre-normalization for obvious travel cases
+    const looksTravel = /\b(holiday|holidays|getaway|getaways|trip|trips|weekend|resort|hotel|hostel|bnb|city\s*break|safari|beach|villa|itinerary|things to do)\b/i.test(prompt)
+      || /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i.test(prompt);
+    const normalized = looksTravel ? normalizeTravelQuery(prompt) : prompt;
+
+    // Pass normalized text to the model so it chooses best tile type
+    const plan = await callOpenAI(normalized);
+
+    // Final safety: coerce maps.q to the normalized string if missing
+    if (plan?.type === "maps" && !plan.q) plan.q = normalized;
+
+    return json({ tile: plan });
+  } catch (e) {
+    return json({ error: String(e) }, 500);
   }
 }
