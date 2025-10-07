@@ -1,12 +1,9 @@
 // /api/ai-tile.js
-// Edge function that turns a free-form query into a concrete tile plan.
-// It returns a single tile JSON the client can render immediately.
+// Edge function that converts a free-form query into ONE tile plan.
 
 export const config = { runtime: "edge" };
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPEN_API_KEY;
-
-// --- helpers ---------------------------------------------------------------
 
 function json(res, status = 200) {
   return new Response(JSON.stringify(res), {
@@ -15,6 +12,7 @@ function json(res, status = 200) {
   });
 }
 
+/* ---------------- Demonyms + helpers ---------------- */
 const DEMONYMS = {
   "british":"United Kingdom","english":"England","scottish":"Scotland","welsh":"Wales","irish":"Ireland",
   "french":"France","spanish":"Spain","italian":"Italy","german":"Germany","portuguese":"Portugal",
@@ -24,7 +22,7 @@ const DEMONYMS = {
   "vietnamese":"Vietnam","indonesian":"Indonesia","malaysian":"Malaysia","australian":"Australia",
   "new zealand":"New Zealand","polish":"Poland","czech":"Czechia","hungarian":"Hungary","croatian":"Croatia",
   "canadian":"Canada","american":"United States","chilean":"Chile","argentinian":"Argentina","brazilian":"Brazil",
-  "south african":"South Africa"
+  "south african":"South Africa","indian":"India"
 };
 
 function demonymToCountry(text){
@@ -34,28 +32,61 @@ function demonymToCountry(text){
   return null;
 }
 
-function normalizeTravelQuery(q) {
-  const raw = (q || "").trim();
-  if (!raw) return raw;
+const ACTIVITY_HINTS = [
+  "holiday ideas","holidays","trip","trips","getaway","getaways","weekend",
+  "things to do","attractions","resort","resorts","hotel","hotels",
+  "villa","villas","beach","beaches","city break","city breaks",
+  // safari-ish
+  "safari","tiger safari","wildlife","national park","game drive","trek","trekking","hiking"
+];
 
-  // "south african safari" -> "... South Africa"
-  const country = demonymToCountry(raw);
-  let out = raw;
-  if (country && !new RegExp(`\\b${country}\\b`, "i").test(raw)) out = `${raw} ${country}`;
-
-  // Bare place name → add useful hint so Maps isn't world-zoomed
-  const looksLikeOnlyPlace = /^[a-z0-9\s'.,-]+$/i.test(out) && out.trim().split(/\s+/).length <= 3;
-  if (looksLikeOnlyPlace && !/\b(holiday|trip|ideas|things to do|attractions|safari|beach|villa|resort|hotel)\b/i.test(out)) {
-    out = `${out} holiday ideas`;
+function extractActivities(qLower){
+  const hits = [];
+  for (const a of ACTIVITY_HINTS) {
+    if (qLower.includes(a)) hits.push(a);
   }
-  return out;
+  // promote tiger -> tiger safari
+  if (qLower.includes("tiger") && !hits.some(x=>x.includes("tiger"))) hits.push("tiger safari");
+  if (qLower.includes("safari") && !hits.includes("safari")) hits.push("safari");
+  if (qLower.includes("trek")) hits.push("trek");
+  return Array.from(new Set(hits));
 }
 
-// --- OpenAI call -----------------------------------------------------------
+function looksLikeOnlyPlace(text){
+  return /^[a-z0-9\s'.,-]+$/i.test(text) && text.trim().split(/\s+/).length <= 3;
+}
 
+function buildSpecificMapsQuery(original) {
+  const raw = (original || "").trim();
+  const lower = raw.toLowerCase();
+  const country = demonymToCountry(raw);
+  const acts = extractActivities(lower);
+
+  let base = raw;
+  if (country && !new RegExp(`\\b${country}\\b`, "i").test(raw)) base = `${raw} ${country}`;
+
+  // If user gave only a place name, add a meaningful hint
+  if (looksLikeOnlyPlace(base) && acts.length === 0) acts.push("holiday ideas");
+
+  // Compose
+  const hint = acts.join(" ");
+  const out = hint ? `${base} ${hint}` : base;
+
+  return out.trim().replace(/\s+/g, " ");
+}
+
+function isGeneric(str){
+  const s = (str || "").toLowerCase().trim();
+  if (!s) return true;
+  if (s.length < 6) return true;
+  return ["holiday ideas","ideas","holidays","trip","trips","getaway","getaways","weekend"]
+    .includes(s);
+}
+
+/* ---------------- OpenAI call ---------------- */
 async function callOpenAI(prompt) {
   if (!OPENAI_API_KEY) {
-    // demo response to avoid hard-failing locally
+    // demo
     return {
       type: "rss",
       title: `Daily Brief — ${prompt.slice(0, 32)}`.trim(),
@@ -66,9 +97,9 @@ async function callOpenAI(prompt) {
   }
 
   const sys = [
-    "You are an agent that maps a user's short query to ONE dashboard tile.",
-    "Return STRICT JSON with keys appropriate to the chosen type, no commentary.",
-    "TYPES you may choose: maps | web | youtube | rss | gallery | stocks",
+    "You map a short user query to ONE dashboard tile.",
+    "Return STRICT JSON only. No prose.",
+    "Allowed types: maps | web | youtube | rss | gallery | stocks",
     "",
     "Schemas:",
     "- maps:   {type, title, q}",
@@ -78,14 +109,10 @@ async function callOpenAI(prompt) {
     "- gallery:{type, title, images:[url,...]}",
     "- stocks: {type, title, symbols:[\"AAPL\",\"MSFT\",...]}",
     "",
-    "Rules:",
-    "- For travel (holiday, getaway, safari, villa, beach, city break, etc.) choose 'maps'.",
-    "- Use demonyms: 'South African' -> 'South Africa', 'French' -> 'France', etc.",
-    "- If the user just gives a place name (e.g., 'Argentina'), append a useful hint like 'holiday ideas'.",
-    "- For how-to, 'why do', or topic queries with no clear site → choose 'rss' using a Google News query.",
-    "- For explicit URLs, choose 'web' and pass the URL.",
-    "- For 'YouTube' words or youtu* links → 'youtube' and include a small playlist (IDs only).",
-    "- Keep titles short, sentence case.",
+    "Guidance:",
+    "- Travel words (holiday, safari, trek, villa, beach, city break, things to do, etc.) → maps.",
+    "- Respect demonyms: French→France, Indian→India, South African→South Africa.",
+    "- Keep titles short.",
   ].join("\n");
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -116,8 +143,7 @@ async function callOpenAI(prompt) {
   return parsed;
 }
 
-// --- handler ---------------------------------------------------------------
-
+/* ---------------- Handler ---------------- */
 export default async function handler(req) {
   try {
     const url = new URL(req.url);
@@ -128,16 +154,22 @@ export default async function handler(req) {
     const prompt = q.trim();
     if (!prompt) return json({ error: "Missing q" }, 400);
 
-    // quick pre-normalization for obvious travel cases
-    const looksTravel = /\b(holiday|holidays|getaway|getaways|trip|trips|weekend|resort|hotel|hostel|bnb|city\s*break|safari|beach|villa|itinerary|things to do)\b/i.test(prompt)
+    // Prefer a specific maps string up front for travel-like queries
+    const travelish = /\b(holiday|holidays|getaway|getaways|trip|trips|weekend|resort|hotel|hostel|bnb|city\s*break|safari|tiger|wildlife|trek|hiking|beach|villa|things to do|attractions|national park)\b/i.test(prompt)
       || /\b(near me|in\s+[A-Za-z][\w\s'-]+)$/i.test(prompt);
-    const normalized = looksTravel ? normalizeTravelQuery(prompt) : prompt;
 
-    // Pass normalized text to the model so it chooses best tile type
-    const plan = await callOpenAI(normalized);
+    const preMapsQ = travelish ? buildSpecificMapsQuery(prompt) : prompt;
 
-    // Final safety: coerce maps.q to the normalized string if missing
-    if (plan?.type === "maps" && !plan.q) plan.q = normalized;
+    // Ask the model to choose the tile
+    let plan = await callOpenAI(preMapsQ);
+
+    // Server-side hardening:
+    if (plan?.type === "maps") {
+      // ensure q is specific and non-generic
+      const qCandidate = plan.q && !isGeneric(plan.q) ? plan.q : preMapsQ;
+      plan.q = isGeneric(qCandidate) ? buildSpecificMapsQuery(prompt) : qCandidate;
+      if (!plan.title) plan.title = `Search — ${prompt}`;
+    }
 
     return json({ tile: plan });
   } catch (e) {
