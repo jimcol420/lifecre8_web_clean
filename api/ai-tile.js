@@ -1,4 +1,4 @@
-// /api/ai-tile.js — v2.3 (maps-first + server-provided zoom)
+// /api/ai-tile.js — v2.4 (ideas → RSS/gallery; maps only on explicit map intent)
 export const config = { runtime: "edge" };
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPEN_API_KEY;
@@ -19,133 +19,128 @@ const DEMONYMS = {
   "south african":"South Africa","indian":"India"
 };
 
-const ACTIVITY_HINTS = [
-  "holiday ideas","holidays","trip","trips","getaway","getaways","weekend",
-  "things to do","attractions","resort","resorts","hotel","hotels",
-  "villa","villas","beach","beaches","city break","city breaks",
-  "safari","tiger safari","wildlife","national park","game drive","trek","trekking","hiking"
-];
-
 function demonymToCountry(text){
   const l = text.toLowerCase();
   const keys = Object.keys(DEMONYMS).sort((a,b)=>b.length-a.length);
   for (const k of keys) if (l.includes(k)) return DEMONYMS[k];
   return null;
 }
-function extractActivities(qLower){
-  const hits = [];
-  for (const a of ACTIVITY_HINTS) if (qLower.includes(a)) hits.push(a);
-  if (qLower.includes("tiger") && !hits.some(x=>x.includes("tiger"))) hits.push("tiger safari");
-  if (qLower.includes("safari") && !hits.includes("safari")) hits.push("safari");
-  if (qLower.includes("trek")) hits.push("trek");
-  return Array.from(new Set(hits));
-}
+
 function looksLikeOnlyPlace(text){
   return /^[a-z0-9\s'.,-]+$/i.test(text) && text.trim().split(/\s+/).length <= 3;
 }
-function cleanTitle(s){ return s.trim().replace(/\s+/g,' '); }
-function isGeneric(s=''){
-  const t = s.toLowerCase().trim();
-  if (!t || t.length < 2) return true;
-  return ["holiday ideas","ideas","holidays","trip","trips","getaway","getaways","weekend"].includes(t);
+const clean = s => (s||"").trim().replace(/\s+/g," ");
+
+function estimateZoom(place){
+  const words = (place||"").trim().split(/\s+/).length;
+  return words <= 2 ? 5 : 11; // country/region vs city/POI
 }
 
-/** Estimate a sensible Google Maps z level. */
-function estimateZoom(placeQuery){
-  const words = (placeQuery||"").trim().split(/\s+/).length;
-  // 1–2 words → likely country/region → wide zoom
-  if (words <= 2) return 5;
-  // 3+ words → likely city/POI → closer
-  return 11;
+/* ---------------- Intent detection ---------------- */
+function hasExplicitMapIntent(q){
+  return /\b(map|maps|near me|directions?|route|navigate|open map)\b/i.test(q);
+}
+function isHolidayIdeas(q){
+  return /\b(holiday|holidays|ideas|inspiration|things to do|attractions|city\s*break|beach(es)?|villa|resort|trek(king)?|safari|wildlife)\b/i.test(q);
+}
+function isVisualCue(q){
+  return /\b(photos?|images?|wallpaper|gallery|inspiration)\b/i.test(q);
+}
+function isMarketsCue(q){
+  return /\b(stocks?|markets?|watchlist|crypto|bitcoin|ethereum)\b/i.test(q) ||
+         /^[A-Z0-9^.-]+(\s*,\s*[A-Z0-9^.-]+){1,}$/i.test(q.trim());
+}
+function isYouTubeCue(q){
+  if (/^(youtube|yt)\s+/i.test(q)) return true;
+  try{
+    const u = new URL(q); return /youtube\.com|youtu\.be/.test(u.hostname);
+  }catch{}
+  return /^[A-Za-z0-9_-]{8,}$/.test(q.trim());
+}
+function isUrl(q){
+  try{ const u=new URL(q); return /^https?:$/.test(u.protocol); }catch{ return false; }
 }
 
-/** Build a Maps search string. If travelish, append hints; else keep toponym clean. */
-function buildSpecificMapsQuery(original, { travelish=false } = {}) {
-  const raw = (original || "").trim();
-  const lower = raw.toLowerCase();
-  const country = demonymToCountry(raw);
-  const acts = travelish ? extractActivities(lower) : [];
+/* ---------------- Heuristic router ---------------- */
+function heuristicPlan(q){
+  const prompt = clean(q);
+  const place = demonymToCountry(prompt) || prompt;
 
-  let base = raw;
-  if (country && !new RegExp(`\\b${country}\\b`, "i").test(raw)) base = `${raw} ${country}`;
-
-  const hint = acts.join(" ");
-  const out = hint ? `${base} ${hint}` : base;
-
-  return out.trim().replace(/\s+/g, " ");
-}
-
-/* ---------------- Recognizers ---------------- */
-function detectUrl(q) {
-  try {
-    const u = new URL(q);
-    if (/^https?:$/.test(u.protocol)) {
-      return { type:"web", title: u.hostname.replace(/^www\./,''), url: q.trim() };
-    }
-  } catch {}
-  return null;
-}
-
-const YT_ID_RE = /^[A-Za-z0-9_-]{8,}$/;
-function detectYouTube(q) {
-  try {
-    const u = new URL(q);
-    if (/youtube\.com|youtu\.be/.test(u.hostname)) {
-      const id = u.searchParams.get("v") || u.pathname.split("/").filter(Boolean).pop();
-      if (id && YT_ID_RE.test(id)) return { type:"youtube", title:"YouTube", playlist:[id] };
-      return { type:"youtube", title:q.trim(), playlist:[] };
-    }
-  } catch {}
-  if (YT_ID_RE.test(q.trim())) return { type:"youtube", title:"YouTube", playlist:[q.trim()] };
-  if (/^(youtube|yt)\s+/i.test(q)) return { type:"youtube", title:q.trim(), playlist:[] };
-  return null;
-}
-
-function detectMarkets(q) {
-  const raw = q.trim();
-  if (/\b(stocks?|markets?|watchlist|crypto|bitcoin|ethereum)\b/i.test(raw)) {
-    const syms = raw.split(/[,\s]+/).filter(s=>/^[A-Z^][A-Z0-9.^-]{0,12}$/.test(s));
-    return { type:"stocks", title:"Markets", symbols: syms.length ? syms.slice(0,12) : ["AAPL","MSFT","BTC-USD"] };
+  // 1) Direct URL → web
+  if (isUrl(prompt)) {
+    const host = prompt.replace(/^https?:\/\/(www\.)?/,'').split('/')[0];
+    return { type:"web", title: host || "Web", url: prompt };
   }
-  if (/^[A-Z0-9^.-]+(\s*,\s*[A-Z0-9^.-]+){1,}$/i.test(raw)) {
-    const syms = raw.split(",").map(s=>s.trim()).filter(Boolean).slice(0,12);
+
+  // 2) YouTube
+  if (isYouTubeCue(prompt)) {
+    // Try to extract ID if it's a URL
+    try{
+      const u = new URL(prompt);
+      const id = u.searchParams.get("v") || u.pathname.split("/").filter(Boolean).pop();
+      if (id) return { type:"youtube", title:"YouTube", playlist:[id] };
+    }catch{}
+    if (/^[A-Za-z0-9_-]{8,}$/.test(prompt)) return { type:"youtube", title:"YouTube", playlist:[prompt] };
+    return { type:"youtube", title:"YouTube", playlist:[] };
+  }
+
+  // 3) Markets
+  if (isMarketsCue(prompt)) {
+    const syms = /^[A-Z0-9^.-]+(\s*,\s*[A-Z0-9^.-]+){1,}$/i.test(prompt)
+      ? prompt.split(",").map(s=>s.trim()).slice(0,12)
+      : ["AAPL","MSFT","BTC-USD"];
     return { type:"stocks", title:"Markets", symbols: syms };
   }
-  return null;
-}
 
-function detectGallery(q) {
-  if (/\bwallpaper|gallery|photos?|images?\b/i.test(q)) return { type:"gallery", title:q.trim(), images:[] };
-  return null;
-}
-
-function detectMaps(q) {
-  const travelish = /\b(holiday|holidays|getaway|getaways|trip|trips|weekend|resort|hotel|hostel|bnb|city\s*break|safari|tiger|wildlife|trek|hiking|beach|villa|things to do|attractions|national park|near me|in\s+[A-Za-z][\w\s'-]+)\b/i.test(q);
-  if (travelish) {
-    const qStr = buildSpecificMapsQuery(q, { travelish:true });
-    const title = cleanTitle(demonymToCountry(q) || q);
-    return { type:"maps", title, q: qStr, zoom: estimateZoom(title) };
+  // 4) Maps ONLY if explicitly requested (or very obviously a place AND user asked for map)
+  if (hasExplicitMapIntent(prompt) || (looksLikeOnlyPlace(prompt) && /\bmap(s)?\b/i.test(prompt))) {
+    const title = clean(place);
+    return { type:"maps", title, q: title, zoom: estimateZoom(title) };
   }
-  if (looksLikeOnlyPlace(q)) {
-    const place = demonymToCountry(q) || q;
-    const qStr  = buildSpecificMapsQuery(place, { travelish:false });
-    const title = cleanTitle(place);
-    return { type:"maps", title, q: qStr, zoom: estimateZoom(title) };
+
+  // 5) Holiday/ideas/inspiration → RSS first (visually rich via feed thumbnails)
+  if (isHolidayIdeas(prompt)) {
+    const title = clean(place);
+    const qNews = encodeURIComponent(prompt);
+    return {
+      type:"rss",
+      title: `Ideas — ${title}`,
+      feeds:[`https://news.google.com/rss/search?q=${qNews}&hl=en-GB&gl=GB&ceid=GB:en`]
+    };
   }
-  return null;
+
+  // 6) Visual cue without explicit “map” → gallery
+  if (isVisualCue(prompt)) {
+    // Client will show the provided URLs if any; we can seed Unsplash source endpoints (no API key needed)
+    const qUns = encodeURIComponent(prompt.replace(/\b(photos?|images?|gallery|wallpaper|inspiration)\b/ig,'').trim() || prompt);
+    const images = Array.from({length:9}).map((_,i)=>`https://source.unsplash.com/600x600/?${qUns}&sig=${i+1}`);
+    return { type:"gallery", title: clean(title || "Gallery"), images };
+  }
+
+  // 7) Bare place without ideas → news tile about that place
+  if (looksLikeOnlyPlace(prompt)) {
+    const title = clean(place);
+    return {
+      type:"rss",
+      title: `Daily Brief — ${title}`,
+      feeds:[`https://news.google.com/rss/search?q=${encodeURIComponent(title)}&hl=en-GB&gl=GB&ceid=GB:en`]
+    };
+  }
+
+  // 8) Default: RSS about the topic
+  return {
+    type:"rss",
+    title:`Daily Brief — ${prompt.slice(0,32)}`,
+    feeds:[`https://news.google.com/rss/search?q=${encodeURIComponent(prompt)}&hl=en-GB&gl=GB&ceid=GB:en`]
+  };
 }
 
-/* ---------------- OpenAI (fallback) ---------------- */
+/* ---------------- OpenAI (for ambiguous stuff only) ---------------- */
 async function callOpenAI(prompt) {
-  if (!OPENAI_API_KEY) {
-    return (
-      detectMaps(prompt) ||
-      detectMarkets(prompt) ||
-      { type:"rss", title:`Daily Brief — ${prompt.slice(0,32)}`, feeds:[`https://news.google.com/rss/search?q=${encodeURIComponent(prompt)}&hl=en-GB&gl=GB&ceid=GB:en`] }
-    );
-  }
+  if (!OPENAI_API_KEY) return heuristicPlan(prompt);
+
   const sys = [
-    "You map a short user query to ONE dashboard tile.",
+    "Map a short user query to ONE dashboard tile.",
     "Return STRICT JSON only. No prose.",
     "Allowed types: maps | web | youtube | rss | gallery | stocks",
     "- maps:   {type, title, q, zoom}",
@@ -154,8 +149,11 @@ async function callOpenAI(prompt) {
     "- rss:    {type, title, feeds:[url,...]}",
     "- gallery:{type, title, images:[url,...]}",
     "- stocks: {type, title, symbols:[\"AAPL\",\"MSFT\",...]}",
-    "Prefer maps for travel words AND for bare place names (1–3 words).",
-    "For maps, set a reasonable zoom: country/region ~5, city/POI ~11."
+    "Rules:",
+    "- Use maps ONLY for explicit map intent (\"map\", \"near me\", \"directions\") — NOT for generic holiday ideas.",
+    "- Holiday/ideas/inspiration → rss. Prefer short titles like 'Ideas — <Place or Topic>'.",
+    "- Visual requests (photos/images/gallery) → gallery with relevant image URLs.",
+    "- For maps, set a reasonable zoom (country~5, city/POI~11)."
   ].join("\n");
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -181,31 +179,22 @@ export default async function handler(req) {
     const prompt = (q || "").trim();
     if (!prompt) return json({ error: "Missing q" }, 400);
 
-    const heur =
-      detectUrl(prompt)    ||
-      detectYouTube(prompt)||
-      detectMaps(prompt)   ||
-      detectMarkets(prompt)||
-      detectGallery(prompt);
+    // Heuristic first; if it returns something sensible, use it.
+    const guess = heuristicPlan(prompt);
+    let plan = guess && guess.type ? guess : await callOpenAI(prompt);
 
-    let plan = heur || await callOpenAI(prompt);
-
+    // Final safety on maps (ensure zoom present)
     if (plan?.type === "maps") {
-      // Ensure q and zoom are present/sensible
-      const travelish = /\b(holiday|holidays|getaway|getaways|trip|trips|weekend|resort|hotel|hostel|bnb|city\s*break|safari|tiger|wildlife|trek|hiking|beach|villa|things to do|attractions|national park)\b/i.test(prompt);
-      const baseTitle = cleanTitle(plan.title || demonymToCountry(prompt) || prompt);
-      plan.title = baseTitle;
-      const candidateQ = plan.q && !isGeneric(plan.q) ? plan.q : buildSpecificMapsQuery(baseTitle, { travelish });
-      plan.q = candidateQ;
-      if (typeof plan.zoom !== "number") plan.zoom = estimateZoom(baseTitle);
+      plan.title = plan.title || prompt;
+      if (typeof plan.zoom !== "number") plan.zoom = estimateZoom(plan.title);
+      if (!plan.q) plan.q = plan.title;
     }
 
-    if (!plan || !plan.type) {
-      plan = { type:"rss", title:`Daily Brief — ${prompt.slice(0,32)}`, feeds:[`https://news.google.com/rss/search?q=${encodeURIComponent(prompt)}&hl=en-GB&gl=GB&ceid=GB:en`] };
-    }
+    // Last-resort fallback
+    if (!plan || !plan.type) plan = heuristicPlan(prompt);
 
     return json({ tile: plan });
   } catch (e) {
-    return json({ tile:{ type:"rss", title:"Daily Brief", feeds:["https://feeds.bbci.co.uk/news/rss.xml"] }, error:String(e) }, 200);
+    return json({ tile: heuristicPlan("news"), error:String(e) }, 200);
   }
 }
