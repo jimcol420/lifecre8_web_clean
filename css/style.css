@@ -1,162 +1,172 @@
-/* ============================================================
-   LifeCre8 — style.css v1.12.0
-   Stable layout: centered grid + right assistant
-   Density modes:
-     - .density-compact     → multi-column grid
-     - .density-comfortable → full-width cards
-============================================================ */
+/* LifeCre8 — style.css v1.7.5 (merge on v1.7.4)
+   - Keep existing layout/variables
+   - Links use theme colors (no default blue)
+   - RSS list styling (thumbnails, spacing, clamped titles)
+   - Guard: grid min column sizing so tiles don’t slip under AI panel
+   - +A11y: :focus-visible outlines for interactive elements
+   - +Safety: images max-width:100% to avoid overflow
+*/
 
-/* ---------- Reset ---------- */
-* { box-sizing: border-box; }
-html, body { height: 100%; }
-body {
-  margin: 0;
-  font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji","Segoe UI Emoji";
-  background: radial-gradient(1200px 700px at 70% 0%, #0a2036 0%, #071624 50%, #06111c 100%) fixed;
-  color: #dfe8f1;
+/* ===== THEME VARS ===== */
+:root{
+  --bg:#0f1320; --panel:#1c2433; --card:#262c3f; --border:#3b455e;
+  --text:#fff8ea; --muted:#f2d4a4;
+  --primary:#f59e0b; --primary-dark:#b45309;
+  --bubble-user:#334155; --bubble-ai:#3b3f53;
+  --right-width:320px; --card-height:420px;
 }
+body.theme-ice{
+  --bg:#eef6ff; --panel:#ffffff; --card:#f3f9ff; --border:#c7ddf6;
+  --text:#0b1b31; --muted:#466791;
+  --primary:#0284c7; --primary-dark:#0369a1;
+  --bubble-user:#e4f2ff; --bubble-ai:#edf6ff;
+}
+body.density-compact{ --card-height:340px; }
 
-/* Theme: Ice */
-body.theme-ice {
-  background: #f7fafc;
-  color: #0b1a2a;
+/* ===== RESETS ===== */
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;
+  background:var(--bg);color:var(--text);overflow:hidden
 }
+img{max-width:100%;height:auto}
 
-/* ---------- Buttons / Inputs ---------- */
-.btn {
-  appearance: none; border: 0;
-  padding: 8px 12px; border-radius: 12px;
-  background: #1c2d44; color: #dfe8f1; cursor: pointer;
-  transition: transform .08s ease, filter .15s ease, background .15s;
-}
-.btn:hover { transform: translateY(-1px); filter: brightness(1.1); }
-.btn.primary { background: #ffb703; color: #102131; }
-.btn.sm { padding: 6px 10px; border-radius: 10px; font-size: 12px; }
-.input {
-  width: 100%; padding: 10px 12px; border-radius: 10px;
-  background: #0e1d30; color: #dfe8f1; border: 1px solid #1f3451;
-}
-body.theme-ice .input { background: #fff; color: #0b1a2a; border-color: #dae2ea; }
-
-/* ---------- Toolbar ---------- */
-#toolbar {
-  max-width: 1280px; margin: 18px auto 8px; padding: 0 16px;
-  display: flex; justify-content: space-between; align-items: center;
-}
-#toolbar .brand { font-weight: 800; letter-spacing: .3px; }
-#toolbar .tools { display: flex; gap: 8px; }
-
-/* ---------- Layout ---------- */
-#layout {
-  max-width: 1280px;
-  margin: 0 auto; padding: 8px 16px 40px;
-  display: grid; gap: 16px;
-  grid-template-columns: 1fr 360px; /* grid + assistant */
-}
-body.assistant-off #layout { grid-template-columns: 1fr 0; }
-
-#gridWrap { min-width: 0; }
-#grid {
-  display: grid; gap: 16px;
+/* Enforce link colors so they never fall back to browser blue */
+a, a:visited{ color: var(--text); text-decoration:none; }
+a:hover{ color: var(--primary); text-decoration:underline; }
+a:focus-visible, button:focus-visible, .sb-icon:focus-visible, .btn:focus-visible, .input:focus-visible{
+  outline:2px solid var(--primary); outline-offset:2px;
+  box-shadow:0 0 0 2px color-mix(in oklab, var(--primary) 30%, transparent);
 }
 
-/* Density = compact → multi-column grid (old layout) */
-body.density-compact #grid {
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+/* ===== LAYOUT ===== */
+.app{display:grid;grid-template-columns:64px 1fr var(--right-width);min-height:100vh}
+.app.no-right{grid-template-columns:64px 1fr 0}
+
+.sidebar{position:sticky;top:0;height:100vh;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding:12px 8px;gap:10px;overflow:auto}
+.sb-icon{width:42px;height:42px;border-radius:12px;background:var(--card);border:1px solid var(--border);display:grid;place-items:center;cursor:pointer;font-size:18px}
+.sb-icon:hover{border-color:var(--primary)}
+.sb-divider{width:100%;height:1px;background:var(--border);margin:6px 0}
+
+.main{grid-column:2;height:100vh;overflow:auto}
+.topbar{position:sticky;top:0;z-index:50;background:var(--panel);border-bottom:1px solid var(--border)}
+.wrap{max-width:1200px;margin:0 auto;padding:12px 16px;display:flex;gap:10px;align-items:center}
+body.density-compact .wrap{padding:8px 12px}
+.spacer{flex:1 1 auto}
+.brand{display:flex;align-items:center;gap:10px;font-weight:800}
+.dot{width:20px;height:20px;border-radius:6px;background:var(--card);position:relative}
+.dot::after{content:"";position:absolute;inset:4px;border-radius:999px;background:var(--primary)}
+
+.input{padding:10px 12px;min-width:220px;border:1px solid var(--border);border-radius:10px;background:var(--panel);color:var(--text)}
+body.theme-ice .input{background:var(--card)}
+body.density-compact .input{padding:8px 10px}
+
+.btn{border:1px solid var(--border);border-radius:10px;background:var(--panel);color:var(--text);padding:10px 12px;cursor:pointer;transition:background .2s,border-color .2s,color .2s}
+.btn:hover{border-color:var(--primary)}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.btn.primary{background:var(--primary);border-color:var(--primary-dark);color:#091015}
+.btn.sm{padding:6px 10px;border-radius:8px;font-size:12px;min-height:30px}
+body.density-compact .btn.sm{padding:4px 8px;min-height:26px}
+
+/* Grid: guard min column sizes so nothing slips behind the AI panel */
+.grid{
+  max-width:1200px;margin:0 auto;padding:16px;display:grid;
+  grid-template-columns:repeat(2,minmax(360px,1fr));
+  gap:16px
+}
+@media(max-width:980px){.grid{grid-template-columns:1fr}}
+
+/* ===== CARDS ===== */
+.card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:14px;box-shadow:0 2px 10px rgba(0,0,0,.15);height:var(--card-height);display:flex;flex-direction:column}
+.card h3{margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+.card h3 .title{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card h3 .actions{flex:0 0 auto;display:flex;gap:6px;white-space:nowrap}
+.card .content{flex:1;overflow:auto}
+
+.row{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.muted{color:var(--muted);font-size:12px}
+
+/* Fullscreen */
+#fsBackdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9998;display:none}
+#fsBackdrop.show{display:block}
+.card.card-full{position:fixed;z-index:9999;inset:10px;width:auto;height:auto;max-width:none;left:0;right:0;transform:none;display:flex;flex-direction:column;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.card.card-full .content{flex:1;overflow:auto}
+.card.card-full .removeBtn{display:none}
+
+/* ===== CHAT PANEL ===== */
+.right{grid-column:3;position:sticky;top:0;height:100vh;overflow:auto;border-left:1px solid var(--border);background:var(--panel);padding:16px;display:flex;flex-direction:column;gap:10px}
+.assistant-chat{height:calc(100vh - 170px);overflow-y:auto;border:1px solid var(--border);border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:8px;background:var(--card)}
+.chat-form{display:flex;gap:8px}
+.msg{padding:8px 10px;border-radius:10px;max-width:90%;border:1px solid var(--border)}
+.msg.user{background:var(--bubble-user);align-self:flex-end}
+.msg.ai{background:var(--bubble-ai);align-self:flex-start}
+
+/* ===== ADD MENU ===== */
+.tile-menu{position:fixed;top:60px;left:90px;z-index:100;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:12px;box-shadow:0 8px 20px rgba(0,0,0,.2)}
+.hidden{display:none}
+
+/* ===== YOUTUBE ===== */
+.yt-embed{width:100%;aspect-ratio:16/9;border:0;border-radius:12px;background:#0a1522}
+.yt-tile{display:grid;gap:10px}
+.card:not(.card-full) .yt-tile{grid-template-columns:1fr}
+.card:not(.card-full) .yt-list{display:flex;flex-direction:column;gap:8px;max-height:140px;overflow:auto}
+.card.card-full .yt-tile{grid-template-columns:2fr 1fr;align-items:start}
+.card.card-full .yt-list{display:flex;flex-direction:column;gap:10px;max-height:calc(90vh - 200px);overflow:auto}
+.yt-item{display:flex;align-items:center;gap:8px;padding:6px;border:1px solid var(--border);border-radius:8px;background:rgba(0,0,0,.03);cursor:pointer;transition:background .2s,border-color .2s}
+.yt-item:hover{background:rgba(0,0,0,.06)}
+.yt-item.active{outline:2px solid var(--primary)}
+.yt-thumb{width:72px;height:42px;object-fit:cover;border-radius:6px;background:#0a1522;border:1px solid var(--border)}
+.yt-title{font-size:12px;line-height:1.2;color:var(--muted)}
+
+/* ===== WEB TILE ===== */
+.web-fallback,.web-preview{border:1px dashed var(--border);border-radius:12px;padding:10px;background:rgba(0,0,0,.03)}
+.web-favicon{width:16px;height:16px;border-radius:4px;margin-right:6px;vertical-align:-3px}
+
+/* ===== STOCKS ===== */
+.ticker{display:grid;gap:8px}
+.trow{display:grid;grid-template-columns:80px 1fr 80px;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:rgba(0,0,0,.03)}
+.sym{font-weight:700;letter-spacing:.5px}
+.price,.chg{text-align:right;font-variant-numeric:tabular-nums}
+.up .chg{color:#22c55e}.down .chg{color:#ef4444}
+
+/* ===== FOOTBALL ===== */
+.scores{display:grid;gap:8px}
+.match{display:grid;grid-template-columns:1fr 48px 1fr 70px;gap:8px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:rgba(0,0,0,.03)}
+.team{display:flex;align-items:center;gap:8px}
+.team img{width:18px;height:18px;border-radius:4px;object-fit:cover;background:#0a1522;border:1px solid var(--border)}
+.score{text-align:center;font-weight:800;font-variant-numeric:tabular-nums}
+.status{text-align:right;font-size:12px;color:var(--muted)}
+.flash{animation:flash .5s ease}
+@keyframes flash{from{background:rgba(245,158,11,.35)}to{background:rgba(0,0,0,.03)}}
+
+/* ===== GALLERY ===== */
+.gallery-tile{position:relative}
+.gallery{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.gallery img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:8px;border:1px solid var(--border);background:#0a1522}
+.card:not(.card-full) .gallery{max-height:calc(var(--card-height) - 110px);overflow:auto}
+.card.card-full .gallery{grid-template-columns:repeat(6,minmax(0,1fr));max-height:none}
+.gallery-view{position:absolute;inset:12px;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.35);border-radius:12px;z-index:2}
+.gallery-view.show{display:flex}
+.gallery-view img{max-width:90%;max-height:90%;border-radius:12px}
+
+/* ===== FOOTER ===== */
+.footer{padding:16px;text-align:center;color:var(--muted)}
+
+/* ===== MODAL (safety) ===== */
+#modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.55); z-index: 2000; }
+#modal.show { display: flex; }
+#modal .modal-card{
+  width:min(560px,calc(100% - 32px));
+  max-height:calc(100vh - 32px);
+  overflow:auto; background:var(--panel); border:1px solid var(--border);
+  border-radius:14px; box-shadow:0 20px 60px rgba(0,0,0,.6); padding:16px;
 }
 
-/* Density = comfortable → full width cards */
-body.density-comfortable #grid {
-  grid-template-columns: 1fr;
-}
-
-/* Assistant panel */
-#assistantPanel {
-  display: none;
-  min-width: 0;
-}
-#assistantPanel.show { display: block; }
-#assistantPanel .chat {
-  height: calc(100vh - 180px);
-  overflow: auto;
-  background: rgba(9, 22, 36, .45);
-  border: 1px solid #1f3451;
-  border-radius: 16px;
-  padding: 10px;
-}
-#assistantPanel .chat .msg { margin: 8px 0; padding: 8px 10px; border-radius: 12px; max-width: 100%; }
-#assistantPanel .chat .msg.user { background: #13314f; }
-#assistantPanel .chat .msg.ai   { background: #19395c; }
-#assistantPanel .chatForm {
-  margin-top: 10px; display: grid; grid-template-columns: 1fr auto; gap: 8px;
-}
-
-/* ---------- Cards ---------- */
-.card {
-  background: rgba(9, 22, 36, .65);
-  border: 1px solid #1f3451;
-  border-radius: 16px;
-  box-shadow: 0 12px 28px rgba(0,0,0,.25);
-  padding: 10px;
-  min-height: 120px;
-}
-.card h3 {
-  margin: 0 0 10px; padding: 0 6px 6px;
-  display: flex; align-items: center; justify-content: space-between;
-  border-bottom: 1px solid rgba(223,232,241,.08);
-}
-.card h3 .title { font-size: 16px; font-weight: 700; }
-.card h3 .actions { display: flex; gap: 8px; }
-
-/* Expand fullscreen */
-.card.card-full {
-  position: fixed; inset: 24px; z-index: 1001;
-  margin: 0; width: auto; height: auto;
-  backdrop-filter: blur(1px);
-  overflow: auto;
-}
-#fsBackdrop {
-  position: fixed; inset: 0; background: rgba(3,8,13,.55);
-  opacity: 0; pointer-events: none; transition: opacity .15s ease;
-  z-index: 1000;
-}
-#fsBackdrop.show { opacity: 1; pointer-events: auto; }
-
-/* ---------- RSS ---------- */
-.rss-controls { display: flex; justify-content: flex-end; margin-bottom: 8px; }
-.rss-item { display: grid; grid-template-columns: 56px 1fr; gap: 10px; align-items: start; padding: 8px; border-radius: 10px; }
-.rss-item:hover { background: rgba(255,255,255,.04); }
-.rss-item img, .rss-item .img { width: 56px; height: 56px; border-radius: 8px; border: 1px solid #1f3451; object-fit: cover; }
-.rss-item .img.ph { background:#0a1626; }
-
-/* ---------- Web tile minimal ---------- */
-.web-header { display:flex; gap:10px; align-items:center; }
-.web-favicon { width: 16px; height:16px; }
-.web-actions { margin-top: 8px; }
-
-/* ---------- Modal ---------- */
-.modal {
-  position: fixed; inset: 0; z-index: 1100;
-  display: flex; align-items: center; justify-content: center;
-  background: rgba(3,8,13,.55);
-}
-.modal.hidden { display: none; }
-.modal-card {
-  background: rgba(9,22,36,.9);
-  border: 1px solid #1f3451; border-radius: 16px;
-  width: min(720px, 92vw); padding: 16px;
-}
-.modal-card h2 { margin: 0 0 12px; }
-.field { margin: 10px 0; }
-.field label { display:block; margin-bottom:6px; font-weight: 600; }
-.actions { display: flex; gap: 8px; justify-content: flex-end; }
-
-/* ---------- Light theme tweaks ---------- */
-body.theme-ice .card,
-body.theme-ice #assistantPanel .chat,
-body.theme-ice .modal-card {
-  background: #fff; color: #0b1a2a; border-color: #dde5ee;
-}
-body.theme-ice .rss-item:hover { background: #f3f7fb; }
-body.theme-ice .btn { background: #e8eef6; color: #0b1a2a; }
-body.theme-ice .btn.primary { background: #ffb703; color: #24354a; }
+/* ===== NEW: RSS ITEM STYLES ===== */
+.rss .rss-item{display:flex;gap:10px;align-items:flex-start;padding:8px 6px;border-bottom:1px dashed var(--border)}
+.rss .rss-item:last-child{border-bottom:0}
+.rss .thumb{width:56px;height:56px;flex:0 0 56px;border-radius:8px;object-fit:cover;border:1px solid var(--border);background:#0a1522}
+.rss .thumb.fallback{display:grid;place-items:center;font-size:11px;color:var(--muted)}
+.rss .meta .title{display:block;line-height:1.2;margin-bottom:4px;max-height:2.4em;overflow:hidden}
+.rss .meta .sub{color:var(--muted);font-size:12px}

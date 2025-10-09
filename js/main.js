@@ -1,13 +1,7 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.12.0
-   What’s in this reset:
-   - Restores stable, centered grid + right-hand assistant layout
-   - Seeds with ONLY the “Daily Brief” tile
-   - New density behavior:
-       • Compact   = multi-column grid (old layout)
-       • Comfortable = each tile full width (still respects assistant on/off)
-   - Solid settings/expand/remove + RSS loader
-   - Assistant toggle preserved (no layout glitches)
+   LifeCre8 — main.js  v1.11.1 (merge)
+   - Seed layout: single tile "Daily Brief"
+   - Keeps v1.11.0 features (AI Add-Tile, chat history, RSS, quotes, maps)
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -18,6 +12,33 @@ const K_VERSION    = "lifecre8.version";
 const K_PREFS      = "lifecre8.prefs";
 const DATA_VERSION = 6;
 
+/* ===== Presets ===== */
+const RSS_PRESETS = {
+  world: [
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "https://www.reuters.com/world/rss",
+  ],
+  tech: [
+    "https://www.theverge.com/rss/index.xml",
+    "https://www.engadget.com/rss.xml",
+    "https://www.wired.com/feed/rss",
+  ],
+  finance: [
+    "https://feeds.bbci.co.uk/news/business/rss.xml",
+    "https://www.reuters.com/markets/rss",
+  ],
+  uk: [
+    "https://feeds.bbci.co.uk/news/rss.xml",
+    "https://www.theguardian.com/uk-news/rss",
+  ],
+};
+
+const STOCK_PRESETS = {
+  "Tech Giants": ["AAPL","MSFT","GOOGL","AMZN","NVDA"],
+  "Crypto": ["BTC-USD","ETH-USD","SOL-USD"],
+  "US Indexes": ["^GSPC","^DJI","^IXIC"],
+};
+
 /* ===== State ===== */
 let sections    = JSON.parse(localStorage.getItem(K_SECTIONS)  || "[]");
 let assistantOn = localStorage.getItem(K_ASSIST_ON) === null ? true : JSON.parse(localStorage.getItem(K_ASSIST_ON));
@@ -26,90 +47,117 @@ if (!chat.length) chat = [{ role:'ai', text:"Hi! I'm your AI Assistant. Ask me a
 
 let prefs = JSON.parse(localStorage.getItem(K_PREFS) || "{}");
 if (!prefs.theme)   prefs.theme   = "solar";
-if (!prefs.density) prefs.density = "compact"; // default to compact (old layout)
+if (!prefs.density) prefs.density = "comfortable";
+document.body.classList.toggle('theme-ice',        prefs.theme   === 'ice');
+document.body.classList.toggle('density-compact',  prefs.density === 'compact');
 
-const $  = (q, r=document) => r.querySelector(q);
-const $$ = (q, r=document) => Array.from(r.querySelectorAll(q));
+let dynamicTimers = {};
+let liveIntervals = {};
+
+/* ===== Utils ===== */
+const $  = q => document.querySelector(q);
+const $$ = q => Array.from(document.querySelectorAll(q));
 const uid = () => Math.random().toString(36).slice(2);
+const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
 
-/* ===== DOM contracts (created if missing) ===== */
-function ensureShell() {
-  // .app
-  let app = $('.app');
-  if (!app) {
-    app = document.createElement('div');
-    app.className = 'app';
-    document.body.appendChild(app);
-  }
+const appEl = document.querySelector(".app");
 
-  // Header (lightweight; your HTML may already render buttons)
-  if (!$('#toolbar')) {
-    const bar = document.createElement('div');
-    bar.id = 'toolbar';
-    bar.innerHTML = `
-      <div class="brand">LifeCre8</div>
-      <div class="tools">
-        <button id="addTileBtnTop" class="btn">Add Tile</button>
-        <button id="globalSettingsBtn" class="btn">Settings</button>
-        <button id="assistantToggle" class="btn ${assistantOn?'primary':''}">AI Assistant</button>
-      </div>
-    `;
-    app.appendChild(bar);
-  }
-
-  // Layout: left grid + right assistant
-  if (!$('#layout')) {
-    const layout = document.createElement('div');
-    layout.id = 'layout';
-    layout.innerHTML = `
-      <main id="gridWrap"><div id="grid"></div></main>
-      <aside id="assistantPanel">
-        <div class="chat" id="assistantChat"></div>
-        <form id="chatForm" class="chatForm">
-          <input id="chatInput" class="input" placeholder="Ask me anything…"/>
-          <button class="btn primary">Send</button>
-        </form>
-      </aside>
-    `;
-    $('.app').appendChild(layout);
-  }
-
-  // Modal + Backdrop for settings
-  if (!$('#modal')) {
-    const m = document.createElement('div');
-    m.id = 'modal';
-    m.className = 'modal hidden';
-    document.body.appendChild(m);
-  }
-  if (!$('#fsBackdrop')) {
-    const b = document.createElement('div');
-    b.id = 'fsBackdrop';
-    document.body.appendChild(b);
-  }
+/* Backdrop for fullscreen */
+let fsBackdrop = document.getElementById("fsBackdrop");
+if (!fsBackdrop) {
+  fsBackdrop = document.createElement("div");
+  fsBackdrop.id = "fsBackdrop";
+  document.body.appendChild(fsBackdrop);
 }
 
-/* ===== Presets ===== */
-const RSS_PRESETS = {
-  uk: [
-    "https://feeds.bbci.co.uk/news/rss.xml",
-    "https://www.theguardian.com/uk-news/rss",
-  ],
-};
-
-/* ===== Seed ===== */
-function rssLoadingMarkup() {
+/* -----------------------------
+   YouTube helpers
+----------------------------- */
+const YT_DEFAULTS = [
+  "M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk",
+];
+const ytEmbedSrc = (id) => `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
+function ytPlaylistMarkup(playlist, currentId) {
+  const ids = (playlist && playlist.length) ? playlist : YT_DEFAULTS;
+  const cur = currentId && ids.includes(currentId) ? currentId : ids[0];
+  const titleFor = (id) => {
+    if (id === "M7lc1UVf-VE") return "YouTube IFrame API Demo";
+    if (id === "5qap5aO4i9A") return "lofi hip hop radio";
+    if (id === "DWcJFNfaw9c") return "Coding Music Mix";
+    if (id === "jfKfPfyJRdk") return "lofi beats stream";
+    return `Video ${id}`;
+  };
+  const items = ids.map(id => `
+    <div class="yt-item ${id===cur?'active':''}" data-vid="${id}">
+      <img class="yt-thumb" src="https://i.ytimg.com/vi/${id}/hqdefault.jpg" alt="">
+      <div class="yt-title">${titleFor(id)}</div>
+    </div>
+  `).join("");
   return `
-    <div class="rss" data-rss>
-      <div class="rss-controls"><button class="btn sm rss-refresh">Refresh</button></div>
-      <div class="muted">Loading…</div>
+    <div class="yt-tile" data-yt data-current="${cur}" data-playlist="${ids.join(',')}">
+      <div class="yt-main">
+        <iframe class="yt-embed" src="${ytEmbedSrc(cur)}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen></iframe>
+      </div>
+      <div class="yt-list">${items}</div>
     </div>
   `;
 }
+
+/* -----------------------------
+   Web tile (no embed toggle)
+----------------------------- */
+function webTileMarkup(url) {
+  const host = hostOf(url);
+  const favicon = host ? `https://www.google.com/s2/favicons?domain=${host}&sz=32` : "";
+  return `
+    <div class="web-tile" data-web data-url="${url}">
+      <div class="web-preview">
+        <div class="web-header">
+          <img class="web-favicon" src="${favicon}" alt="">
+          <div>
+            <div class="web-title">${host || url}</div>
+            <div class="web-host">${url}</div>
+          </div>
+        </div>
+        <div class="web-actions">
+          <a class="btn sm" href="${url}" target="_blank" rel="noopener">Open</a>
+        </div>
+        <div class="muted" style="margin-top:6px">Some sites block embedding. Use Open to view.</div>
+      </div>
+    </div>
+  `;
+}
+
+/* -----------------------------
+   Maps tile (travel intent)
+----------------------------- */
+function mapsTileMarkup(query){
+  const embed   = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
+  const open    = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
+  const booking = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(query)}`;
+  const trip    = `https://www.tripadvisor.com/Search?q=${encodeURIComponent(query)}`;
+  return `
+    <div data-maps>
+      <div class="web-actions" style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap">
+        <a class="btn sm" href="${open}" target="_blank" rel="noopener">Open Maps</a>
+        <a class="btn sm" href="${booking}" target="_blank" rel="noopener">Booking</a>
+        <a class="btn sm" href="${trip}" target="_blank" rel="noopener">Tripadvisor</a>
+      </div>
+      <iframe src="${embed}" style="width:100%;height:320px;border:0;border-radius:10px"></iframe>
+    </div>
+  `;
+}
+
+/* -----------------------------
+   RSS tile (enriched)
+----------------------------- */
 function rssListMarkup(items) {
   const list = (items || []).map(i => `
-    <div class="rss-item">
-      ${i.image ? `<img src="${i.image}" alt="">` : `<div class="img ph"></div>`}
-      <div class="meta">
+    <div class="rss-item" style="display:flex; gap:10px; align-items:flex-start;">
+      ${i.image ? `<img src="${i.image}" alt="" style="width:56px;height:56px;object-fit:cover;border-radius:8px;border:1px solid var(--border)" />`
+                 : `<div style="width:56px;height:56px;border-radius:8px;border:1px solid var(--border);background:#0a1522"></div>`}
+      <div>
         <a href="${i.link}" target="_blank" rel="noopener">${i.title}</a>
         <div class="muted">${i.source || ''} ${i.time ? `— ${i.time}`:''}</div>
       </div>
@@ -117,8 +165,18 @@ function rssListMarkup(items) {
   `).join("");
   return `
     <div class="rss" data-rss>
-      <div class="rss-controls"><button class="btn sm rss-refresh">Refresh</button></div>
+      <div class="rss-controls">
+        <button class="btn sm rss-refresh">Refresh</button>
+      </div>
       ${list}
+    </div>
+  `;
+}
+function rssLoadingMarkup() {
+  return `
+    <div class="rss" data-rss>
+      <div class="rss-controls"><button class="btn sm rss-refresh">Refresh</button></div>
+      <div class="muted">Loading…</div>
     </div>
   `;
 }
@@ -130,89 +188,6 @@ function rssErrorMarkup() {
     </div>
   `;
 }
-
-function defaultSections() {
-  // Only the Daily Brief tile
-  return [
-    { id: uid(), type:"rss", title:"Daily Brief", meta:{ feeds: RSS_PRESETS.uk }, content: rssLoadingMarkup() }
-  ];
-}
-
-/* ===== Versioning / Seed ===== */
-function ensureVersion() {
-  const current = parseInt(localStorage.getItem(K_VERSION) || "0", 10);
-  if (!sections.length) {
-    sections = defaultSections();
-    localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-  }
-  if (current !== DATA_VERSION) {
-    localStorage.setItem(K_VERSION, String(DATA_VERSION));
-  }
-}
-
-/* ===== Rendering ===== */
-function tileContentFor(section) {
-  switch (section.type) {
-    case "rss": return section.content || rssLoadingMarkup();
-    case "web": {
-      const url = section.meta?.url || "https://example.com";
-      const host = (()=>{ try { return new URL(url).hostname; } catch { return url; }})();
-      return `
-        <div class="web-tile" data-web data-url="${url}">
-          <div class="web-preview">
-            <div class="web-header">
-              <img class="web-favicon" src="https://www.google.com/s2/favicons?domain=${host}&sz=32" alt="">
-              <div>
-                <div class="web-title">${host}</div>
-                <div class="web-host">${url}</div>
-              </div>
-            </div>
-            <div class="web-actions">
-              <a class="btn sm" href="${url}" target="_blank" rel="noopener">Open</a>
-            </div>
-            <div class="muted" style="margin-top:6px">Some sites block embedding. Use Open to view.</div>
-          </div>
-        </div>
-      `;
-    }
-    default:   return section.content || "Empty";
-  }
-}
-function cardHeaderActions(id){
-  return `
-    <div class="actions">
-      <button class="btn sm settingsBtn" data-id="${id}">Settings</button>
-      <button class="btn sm expandBtn" data-id="${id}">⤢ Expand</button>
-      <button class="btn sm removeBtn" data-id="${id}">Remove</button>
-    </div>
-  `;
-}
-function render() {
-  const grid = $('#grid');
-  grid.innerHTML = "";
-
-  sections.forEach(s => {
-    const card = document.createElement("section");
-    card.className = "card";
-    card.dataset.id = s.id;
-    card.dataset.type = s.type || "tile";
-    card.innerHTML = `
-      <h3><span class="title">${s.title}</span>${cardHeaderActions(s.id)}</h3>
-      <div class="content">${tileContentFor(s)}</div>
-    `;
-    grid.appendChild(card);
-  });
-
-  // load RSS after render
-  $$('.card[data-type="rss"]').forEach(card=>{
-    const id = card.dataset.id;
-    const s  = sections.find(x=>x.id===id);
-    const feeds = s?.meta?.feeds || RSS_PRESETS.uk;
-    loadRssInto(card, feeds);
-  });
-}
-
-/* ===== RSS loader ===== */
 function loadRssInto(card, feeds, attempt=1) {
   const content = card.querySelector(".content");
   if (!feeds || !feeds.length || !content) return;
@@ -230,201 +205,507 @@ function loadRssInto(card, feeds, attempt=1) {
     });
 }
 
-/* ===== Assistant ===== */
-function updateAssistant() {
-  const panel = $('#assistantPanel');
-  const toggle = $('#assistantToggle');
-  if (!panel || !toggle) return;
-
-  panel.classList.toggle('show', assistantOn);
-  toggle.classList.toggle('primary', assistantOn);
-  document.body.classList.toggle('assistant-off', !assistantOn);
-  localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
+/* -----------------------------
+   Gallery
+----------------------------- */
+function galleryMarkup(urls) {
+  const imgs = (urls || []).map(u => `<img src="${u}" alt="">`).join("");
+  return `
+    <div class="gallery-tile" data-gallery>
+      <div class="gallery-view"><img alt=""></div>
+      <div class="gallery">${imgs}</div>
+    </div>
+  `;
 }
 
+/* -----------------------------
+   Markets
+----------------------------- */
+function tickerMarkup(symbols) {
+  const rows = symbols.map(sym => `
+    <div class="trow" data-sym="${sym}">
+      <div class="sym">${sym}</div>
+      <div class="price" data-price>—</div>
+      <div class="chg" data-chg>—</div>
+    </div>`).join("");
+  return `<div class="ticker" data-symbols="${symbols.join(",")}">${rows}</div>`;
+}
+function loadQuotesInto(card, symbols) {
+  const url = `/api/quote?symbols=${encodeURIComponent(symbols.join(','))}`;
+  fetch(url)
+    .then(r=>r.json())
+    .then(data=>{
+      const map = {};
+      (data.quotes||data.items||[]).forEach(q=>{ map[(q.symbol||"").toUpperCase()] = q; });
+      const rows = card.querySelectorAll(".trow");
+      rows.forEach(row=>{
+        const sym = row.dataset.sym.toUpperCase();
+        const q = map[sym];
+        if (!q) return;
+        const priceEl = row.querySelector("[data-price]");
+        const chgEl   = row.querySelector("[data-chg]");
+        const price = q.price;
+        const delta = (q.change!=null) ? q.change : q.change24h;
+        const pct   = (q.changePercent!=null) ? q.changePercent : q.changePct24h;
+        priceEl.textContent = (price!=null) ? Number(price).toFixed(2) : "—";
+        chgEl.textContent   = (delta!=null && pct!=null)
+          ? `${delta>=0?"+":""}${Number(delta).toFixed(2)}  (${pct>=0?"+":""}${Number(pct).toFixed(2)}%)`
+          : "—";
+        row.classList.toggle("up",   Number(delta) >= 0);
+        row.classList.toggle("down", Number(delta) <  0);
+      });
+    })
+    .catch(()=>{
+      const content = card.querySelector(".content");
+      if (content && !content.querySelector(".ticker")) {
+        content.innerHTML = `<div class="muted">Live prices unavailable right now.</div>`;
+      }
+    });
+}
+
+/* -----------------------------
+   Defaults (ONE TILE ONLY)
+----------------------------- */
+function defaultSections() {
+  return [
+    { id: uid(), type:"rss", title:"Daily Brief", meta:{ feeds: RSS_PRESETS.uk }, content: rssLoadingMarkup() }
+  ];
+}
+
+/* -----------------------------
+   Storage versioning / seed
+----------------------------- */
+function ensureVersion() {
+  const current = parseInt(localStorage.getItem(K_VERSION) || "0", 10);
+  if (!sections.length) {
+    sections = defaultSections();
+    localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+  }
+  if (current !== DATA_VERSION) {
+    localStorage.setItem(K_VERSION, String(DATA_VERSION));
+  }
+}
+
+/* -----------------------------
+   Render helpers
+----------------------------- */
+function tileContentFor(section) {
+  switch (section.type) {
+    case "youtube": {
+      const playlist = section.meta?.playlist || (section.meta?.videoId ? [section.meta.videoId] : YT_DEFAULTS);
+      const current  = section.meta?.current || section.meta?.videoId || playlist[0];
+      return ytPlaylistMarkup(playlist, current);
+    }
+    case "web": {
+      const url = section.meta?.url || "https://example.com";
+      return webTileMarkup(url);
+    }
+    case "maps": {
+      const q = section.meta?.q || "nearby";
+      return mapsTileMarkup(q);
+    }
+    case "rss":  return section.content || rssLoadingMarkup();
+    case "gallery": {
+      const urls = section.meta?.urls || [];
+      return galleryMarkup(urls);
+    }
+    case "stocks": return section.content;
+    default: return section.content || "Empty tile";
+  }
+}
+function cardHeaderActions(id){
+  return `
+    <div class="actions">
+      <button class="btn sm settingsBtn" data-id="${id}">Settings</button>
+      <button class="btn sm expandBtn" data-id="${id}">⤢ Expand</button>
+      <button class="btn sm removeBtn" data-id="${id}">Remove</button>
+    </div>
+  `;
+}
+function render() {
+  Object.values(dynamicTimers).forEach(clearInterval); dynamicTimers = {};
+  Object.values(liveIntervals).forEach(clearInterval); liveIntervals = {};
+
+  const grid = $("#grid");
+  grid.innerHTML = "";
+
+  sections.forEach(s => {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.dataset.id = s.id;
+    card.dataset.type = s.type || "interest";
+    card.innerHTML = `
+      <h3>
+        <span class="title">${s.title}</span>
+        ${cardHeaderActions(s.id)}
+      </h3>
+      <div class="content">${tileContentFor(s)}</div>
+    `;
+    grid.appendChild(card);
+  });
+
+  // live: RSS + Quotes
+  $$('.card[data-type="rss"]').forEach(card=>{
+    const id = card.dataset.id;
+    const s = sections.find(x=>x.id===id);
+    const feeds = s?.meta?.feeds || RSS_PRESETS.uk;
+    loadRssInto(card, feeds);
+    liveIntervals[id+"_rss"] = setInterval(()=>loadRssInto(card, feeds), 15*60*1000);
+  });
+  $$('.card[data-type="stocks"]').forEach(card=>{
+    const id = card.dataset.id;
+    const ticker = card.querySelector(".ticker");
+    if (!ticker) return;
+    const syms = (ticker.dataset.symbols || "").split(",").map(s=>s.trim()).filter(Boolean);
+    const refresh = () => loadQuotesInto(card, syms);
+    refresh();
+    liveIntervals[id+"_quotes"] = setInterval(refresh, 30*1000);
+  });
+}
+
+/* -----------------------------
+   Delegated handlers
+----------------------------- */
+(function attachDelegatesOnce(){
+  const grid = $("#grid");
+
+  // Expand / Collapse
+  grid.addEventListener("click", (e)=>{
+    const btn = e.target.closest(".expandBtn");
+    if (!btn) return;
+    const card = btn.closest(".card");
+    if (!card) return;
+
+    if (card.classList.contains("card-full")) {
+      card.classList.remove("card-full");
+      document.body.style.overflow = "";
+      fsBackdrop.classList.remove("show");
+      btn.textContent = "⤢ Expand";
+    } else {
+      card.classList.add("card-full");
+      document.body.style.overflow = "hidden";
+      fsBackdrop.classList.add("show");
+      btn.textContent = "Close";
+    }
+  });
+
+  // Remove
+  grid.addEventListener("click", (e)=>{
+    const btn = e.target.closest(".removeBtn");
+    if (!btn) return;
+    const card = btn.closest(".card");
+    const id = btn.dataset.id;
+    if (card?.classList.contains("card-full")) {
+      card.classList.remove("card-full");
+      document.body.style.overflow = "";
+      fsBackdrop.classList.remove("show");
+    }
+    sections = sections.filter(s=>s.id!==id);
+    localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+    render();
+  });
+
+  // Settings (per tile)
+  grid.addEventListener("click", (e)=>{
+    const btn = e.target.closest(".settingsBtn");
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const s = sections.find(x => x.id === id);
+    if (!s) return;
+
+    let fields = "";
+    if (s.type === "web") {
+      const url = s.meta?.url || "";
+      fields = `
+        <div class="field"><label>URL</label>
+          <input class="input" id="set_url" value="${url}">
+        </div>`;
+    } else if (s.type === "maps") {
+      const q = s.meta?.q || "";
+      fields = `
+        <div class="field"><label>Maps search</label>
+          <input class="input" id="set_maps_q" value="${q}">
+        </div>`;
+    } else if (s.type === "youtube") {
+      const list = (s.meta?.playlist || YT_DEFAULTS).join(",");
+      fields = `
+        <div class="field"><label>Playlist (comma-separated video IDs)</label>
+          <input class="input" id="set_playlist" value="${list}">
+        </div>`;
+    } else if (s.type === "stocks") {
+      const syms = (s.meta?.symbols || ["AAPL","MSFT","BTC-USD"]).join(",");
+      const presetOptions = Object.keys(STOCK_PRESETS).map(name=>`<option value="${name}">${name}</option>`).join("");
+      fields = `
+        <div class="field"><label>Symbols (comma-separated)</label>
+          <input class="input" id="set_symbols" value="${syms}">
+        </div>
+        <div class="field"><label>Presets</label>
+          <div class="row" style="gap:8px">
+            <select class="input" id="set_symbols_preset" style="min-width:180px">
+              <option value="">Choose a preset…</option>
+              ${presetOptions}
+            </select>
+            <button class="btn sm" id="apply_symbols_preset" type="button">Apply</button>
+          </div>
+        </div>`;
+    } else if (s.type === "rss") {
+      const feeds = (s.meta?.feeds || RSS_PRESETS.uk).join(",");
+      const presetOptions = Object.keys(RSS_PRESETS).map(key=>`<option value="${key}">${key.toUpperCase()}</option>`).join("");
+      fields = `
+        <div class="field"><label>RSS feeds (comma-separated URLs; first is used)</label>
+          <input class="input" id="set_feeds" value="${feeds}">
+        </div>
+        <div class="field"><label>News Presets</label>
+          <div class="row" style="gap:8px">
+            <select class="input" id="set_feeds_preset" style="min-width:180px">
+              <option value="">Choose a preset…</option>
+              ${presetOptions}
+            </select>
+            <button class="btn sm" id="apply_feeds_preset" type="button">Apply</button>
+          </div>
+        </div>`;
+    } else {
+      fields = `<div class="muted">No settings for this tile.</div>`;
+    }
+
+    const html = `
+      <div class="modal-card">
+        <h2>Settings — ${s.title}</h2>
+        ${fields}
+        <div class="actions" style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn sm" data-action="cancel">Cancel</button>
+          <button class="btn sm primary" data-action="save" id="settingsSaveBtn">Save</button>
+        </div>
+      </div>`;
+    __openModal(html);
+
+    $("#apply_symbols_preset")?.addEventListener("click", ()=>{
+      const key = $("#set_symbols_preset").value;
+      if (!key) return;
+      const arr = STOCK_PRESETS[key] || [];
+      $("#set_symbols").value = arr.join(",");
+    });
+    $("#apply_feeds_preset")?.addEventListener("click", ()=>{
+      const key = $("#set_feeds_preset").value;
+      if (!key) return;
+      const arr = RSS_PRESETS[key] || [];
+      $("#set_feeds").value = arr.join(",");
+    });
+
+    $("#settingsSaveBtn")?.addEventListener("click", ()=>{
+      if (s.type === "web") {
+        const url = $("#set_url")?.value?.trim() || s.meta?.url || "";
+        s.meta = {...(s.meta||{}), url };
+        s.content = webTileMarkup(url);
+      } else if (s.type === "maps") {
+        const q = $("#set_maps_q")?.value?.trim() || s.meta?.q || "";
+        s.meta = {...(s.meta||{}), q};
+        s.content = mapsTileMarkup(q);
+      } else if (s.type === "youtube") {
+        const playlist = ($("#set_playlist")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
+        const list = playlist.length? playlist : (s.meta?.playlist || YT_DEFAULTS);
+        const current = list[0];
+        s.meta = {...(s.meta||{}), playlist:list, current};
+        s.content = ytPlaylistMarkup(list, current);
+      } else if (s.type === "stocks") {
+        const symbols = ($("#set_symbols")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
+        const syms = symbols.length? symbols : (s.meta?.symbols || ["AAPL","MSFT","BTC-USD"]);
+        s.meta = {...(s.meta||{}), symbols: syms};
+        s.content = tickerMarkup(syms);
+      } else if (s.type === "rss") {
+        const feeds = ($("#set_feeds")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
+        const list = feeds.length? feeds : (s.meta?.feeds || RSS_PRESETS.uk);
+        s.meta = {...(s.meta||{}), feeds: list};
+        s.content = rssLoadingMarkup();
+      }
+      localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+      __closeModal();
+      render();
+    }, { once:true });
+  });
+
+  // Backdrop close
+  fsBackdrop.addEventListener("click", ()=>{
+    const open = document.querySelector(".card.card-full");
+    if (!open) return;
+    const closeBtn = open.querySelector(".expandBtn");
+    open.classList.remove("card-full");
+    document.body.style.overflow = "";
+    fsBackdrop.classList.remove("show");
+    if (closeBtn) closeBtn.textContent = "⤢ Expand";
+  });
+
+  // Esc closes fullscreen
+  document.addEventListener("keydown", (e)=>{
+    if (e.key === "Escape") {
+      const open = document.querySelector(".card.card-full");
+      if (!open) return;
+      const closeBtn = open.querySelector(".expandBtn");
+      open.classList.remove("card-full");
+      document.body.style.overflow = "";
+      fsBackdrop.classList.remove("show");
+      if (closeBtn) closeBtn.textContent = "⤢ Expand";
+    }
+  });
+
+  // YouTube swap
+  grid.addEventListener("click", (e) => {
+    const item = e.target.closest(".yt-item");
+    if (!item) return;
+    const container = item.closest("[data-yt]");
+    if (!container) return;
+    const newId = item.dataset.vid;
+    const iframe = container.querySelector("iframe.yt-embed");
+    if (!iframe) return;
+    container.querySelectorAll(".yt-item").forEach(el => el.classList.remove("active"));
+    item.addClass?.("active") || item.classList.add("active");
+    iframe.src = ytEmbedSrc(newId);
+  });
+
+  // RSS refresh
+  grid.addEventListener("click", (e) => {
+    const refresh = e.target.closest(".rss-refresh");
+    if (!refresh) return;
+    const card = e.target.closest(".card");
+    if (!card) return;
+    const id = card.dataset.id;
+    const s = sections.find(x => x.id === id);
+    if (!s) return;
+    const feeds = s.meta?.feeds || RSS_PRESETS.uk;
+    loadRssInto(card, feeds);
+  });
+})();
+
+/* -----------------------------
+   Add Tile — AI agent
+----------------------------- */
+const addBtn     = $("#addTileBtnTop");
+const tileMenu   = $("#tileMenu");
+const tileSearch = $("#tileSearch");
+
+addBtn?.addEventListener("click", () => {
+  tileMenu?.classList.toggle("hidden");
+  if (!tileMenu?.classList.contains("hidden")) tileSearch?.focus();
+});
+
+tileSearch?.addEventListener("keydown", async (e)=>{
+  if (e.key !== "Enter") { if (e.key === "Escape") tileMenu?.classList.add("hidden"); return; }
+
+  const q = (tileSearch.value || "").trim();
+  if (!q) return;
+
+  let plan;
+  try {
+    const r = await fetch("/api/ai-tile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q })
+    });
+    const j = await r.json();
+    plan = j.tile || j;
+  } catch {
+    plan = {
+      type: "rss",
+      title: `Daily Brief — ${q}`,
+      feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`]
+    };
+  }
+
+  let newTile = null;
+  if (plan.type === "maps" && plan.q) {
+    newTile = { id: uid(), type: "maps", title: `Search — ${q}`, meta:{ q: plan.q }, content: mapsTileMarkup(plan.q) };
+  } else if (plan.type === "web" && plan.url) {
+    newTile = { id: uid(), type: "web", title: plan.title || hostOf(plan.url) || "Web", meta:{ url: plan.url }, content: webTileMarkup(plan.url) };
+  } else if (plan.type === "youtube" && Array.isArray(plan.playlist) && plan.playlist.length) {
+    const cur = plan.playlist[0];
+    newTile = { id: uid(), type:"youtube", title: plan.title || "YouTube", meta:{ playlist: plan.playlist, current: cur }, content: ytPlaylistMarkup(plan.playlist, cur) };
+  } else if (plan.type === "rss" && Array.isArray(plan.feeds) && plan.feeds.length) {
+    newTile = { id: uid(), type:"rss", title: plan.title || `Daily Brief — ${q}`, meta:{ feeds: plan.feeds }, content: rssLoadingMarkup() };
+  } else if (plan.type === "gallery" && Array.isArray(plan.images) && plan.images.length) {
+    newTile = { id: uid(), type:"gallery", title: plan.title || "Gallery", meta:{ urls: plan.images }, content: galleryMarkup(plan.images) };
+  } else if (plan.type === "stocks" && Array.isArray(plan.symbols) && plan.symbols.length) {
+    newTile = { id: uid(), type:"stocks", title: plan.title || "Markets", meta:{ symbols: plan.symbols }, content: tickerMarkup(plan.symbols) };
+  }
+
+  if (!newTile) {
+    newTile = {
+      id: uid(), type:"rss", title:`Daily Brief — ${q}`,
+      meta:{ feeds: [`https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-GB&gl=GB&ceid=GB:en`] },
+      content: rssLoadingMarkup()
+    };
+  }
+
+  sections.unshift(newTile);
+  localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
+  render();
+  tileMenu?.classList.add("hidden");
+  tileSearch.value = "";
+});
+
+/* -----------------------------
+   Assistant Toggle & Chat (standalone)
+----------------------------- */
+const assistantToggle = $("#assistantToggle");
+const assistantPanel  = $("#assistantPanel");
+const chatLog   = $("#assistantChat");
+const chatForm  = $("#chatForm");
+const chatInput = $("#chatInput");
+
+function updateAssistant() {
+  if (!assistantPanel) return;
+  assistantPanel.style.display = assistantOn ? "block" : "none";
+  assistantToggle?.classList.toggle("primary", assistantOn);
+  appEl?.classList.toggle("no-right", !assistantOn);
+  localStorage.setItem(K_ASSIST_ON, JSON.stringify(assistantOn));
+}
+assistantToggle?.addEventListener("click", (e) => {
+  e.preventDefault();
+  assistantOn = !assistantOn;
+  updateAssistant();
+});
+
 function renderChat(){
-  const log = $('#assistantChat');
-  if (!log) return;
-  log.innerHTML = "";
+  if (!chatLog) return;
+  chatLog.innerHTML = "";
   chat.forEach(m=>{
     const d = document.createElement("div");
     d.className = `msg ${m.role}`;
     d.textContent = m.text;
-    log.appendChild(d);
+    chatLog.appendChild(d);
   });
-  log.scrollTop = log.scrollHeight;
+  chatLog.scrollTop = chatLog.scrollHeight;
 }
 function addChat(role, text){
   chat.push({role, text});
   localStorage.setItem(K_CHAT, JSON.stringify(chat));
   renderChat();
 }
-function bindChat() {
-  const form = $('#chatForm');
-  const input = $('#chatInput');
-  if (!form || !input) return;
 
-  form.addEventListener('submit', async (e)=>{
-    e.preventDefault();
-    const text = input.value.trim();
-    if (!text) return;
-    addChat('user', text);
-    input.value = '';
-    try {
-      const r = await fetch('/api/ai-chat', {
-        method: 'POST',
-        headers: { 'Content-Type':'application/json' },
-        body: JSON.stringify({ q: text, messages: chat })
-      });
-      const j = await r.json();
-      addChat('ai', j.message || '…');
-    } catch {
-      addChat('ai', "I couldn't reach the chat service right now.");
-    }
-  });
-}
+chatForm?.addEventListener("submit", async (e)=>{
+  e.preventDefault();
+  const text = chatInput.value.trim();
+  if (!text) return;
+  addChat('user', text);
+  chatInput.value = "";
+  try {
+    const r = await fetch("/api/ai-chat", {
+      method:"POST",
+      headers: { "Content-Type":"application/json" },
+      body: JSON.stringify({ q: text, messages: chat })
+    });
+    const j = await r.json();
+    addChat('ai', j.message || "…");
+  } catch {
+    addChat('ai', "I couldn't reach the chat service just now. Try again in a moment.");
+  }
+});
 
-/* ===== Settings modal ===== */
-function openModal(html){
-  const modal = $('#modal');
-  if (!modal) return;
-  modal.innerHTML = `<div class="modal-card">${html}</div>`;
-  modal.classList.remove('hidden');
-  modal.classList.add('show');
-  document.body.style.overflow = 'hidden';
-}
-function closeModal(){
-  const modal = $('#modal');
-  if (!modal) return;
-  modal.classList.add('hidden');
-  modal.classList.remove('show');
-  modal.innerHTML = '';
-  document.body.style.overflow = '';
-}
-
-/* ===== Delegated grid events ===== */
-function bindGridEvents(){
-  const grid = $('#grid');
-  const backdrop = $('#fsBackdrop');
-
-  // Expand
-  grid.addEventListener('click', (e)=>{
-    const btn = e.target.closest('.expandBtn');
-    if (!btn) return;
-    const card = btn.closest('.card');
-    card.classList.toggle('card-full');
-    document.body.style.overflow = card.classList.contains('card-full') ? 'hidden' : '';
-    backdrop.classList.toggle('show', card.classList.contains('card-full'));
-    btn.textContent = card.classList.contains('card-full') ? 'Close' : '⤢ Expand';
-  });
-
-  // Remove
-  grid.addEventListener('click', (e)=>{
-    const btn = e.target.closest('.removeBtn');
-    if (!btn) return;
-    const id = btn.dataset.id;
-    sections = sections.filter(s=>s.id!==id);
-    localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-    render();
-  });
-
-  // Settings (per tile – only RSS has options right now)
-  grid.addEventListener('click', (e)=>{
-    const btn = e.target.closest('.settingsBtn');
-    if (!btn) return;
-    const id = btn.dataset.id;
-    const s = sections.find(x=>x.id===id);
-    if (!s) return;
-
-    let fields = '';
-    if (s.type === 'rss') {
-      const feeds = (s.meta?.feeds || RSS_PRESETS.uk).join(',');
-      fields = `
-        <h2>Settings — ${s.title}</h2>
-        <div class="field">
-          <label>RSS feeds (comma separated; first is used)</label>
-          <input class="input" id="set_feeds" value="${feeds}">
-        </div>
-        <div class="actions">
-          <button class="btn" data-action="cancel">Cancel</button>
-          <button class="btn primary" data-action="save">Save</button>
-        </div>
-      `;
-    } else if (s.type === 'web') {
-      const url = s.meta?.url || '';
-      fields = `
-        <h2>Settings — ${s.title}</h2>
-        <div class="field">
-          <label>URL</label>
-          <input class="input" id="set_url" value="${url}">
-        </div>
-        <div class="actions">
-          <button class="btn" data-action="cancel">Cancel</button>
-          <button class="btn primary" data-action="save">Save</button>
-        </div>
-      `;
-    } else {
-      fields = `
-        <h2>Settings — ${s.title}</h2>
-        <div class="muted">No settings available for this tile.</div>
-        <div class="actions">
-          <button class="btn primary" data-action="cancel">Close</button>
-        </div>
-      `;
-    }
-
-    openModal(fields);
-
-    $('#modal').addEventListener('click', (ev)=>{
-      const cancel = ev.target.closest('[data-action="cancel"]');
-      const save   = ev.target.closest('[data-action="save"]');
-      if (cancel) { closeModal(); }
-      if (save) {
-        if (s.type === 'rss') {
-          const feeds = ($('#set_feeds').value || '').split(',').map(x=>x.trim()).filter(Boolean);
-          s.meta = {...(s.meta||{}), feeds: feeds.length ? feeds : RSS_PRESETS.uk};
-          s.content = rssLoadingMarkup();
-        } else if (s.type === 'web') {
-          const url = ($('#set_url').value || '').trim();
-          s.meta = {...(s.meta||{}), url};
-          s.content = tileContentFor(s);
-        }
-        localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-        closeModal();
-        render();
-      }
-    }, { once:true });
-  });
-
-  // Backdrop & Esc
-  $('#fsBackdrop').addEventListener('click', ()=>{
-    const open = $('.card.card-full');
-    if (!open) return;
-    open.classList.remove('card-full');
-    document.body.style.overflow = '';
-    $('#fsBackdrop').classList.remove('show');
-    open.querySelector('.expandBtn').textContent = '⤢ Expand';
-  });
-  document.addEventListener('keydown', (e)=>{
-    if (e.key === 'Escape' && $('.card.card-full')) {
-      const open = $('.card.card-full');
-      open.classList.remove('card-full');
-      document.body.style.overflow = '';
-      $('#fsBackdrop').classList.remove('show');
-      open.querySelector('.expandBtn').textContent = '⤢ Expand';
-    }
-  });
-}
-
-/* ===== Toolbar events ===== */
-function bindToolbar() {
-  $('#assistantToggle')?.addEventListener('click', ()=>{
-    assistantOn = !assistantOn;
-    updateAssistant();
-  });
-
-  $('#globalSettingsBtn')?.addEventListener('click', ()=>{
-    const html = `
+/* -----------------------------
+   Global settings (Top button)
+----------------------------- */
+$("#globalSettingsBtn")?.addEventListener("click", ()=>{
+  const html = `
+    <div class="modal-card">
       <h2>Global Settings</h2>
       <div class="field">
         <label>Theme</label>
@@ -436,76 +717,83 @@ function bindToolbar() {
       <div class="field">
         <label>Density</label>
         <select class="input" id="g_density">
-          <option value="compact" ${prefs.density==='compact'?'selected':''}>Compact (grid)</option>
-          <option value="comfortable" ${prefs.density==='comfortable'?'selected':''}>Comfortable (full width)</option>
+          <option value="comfortable" ${prefs.density==='comfortable'?'selected':''}>Comfortable</option>
+          <option value="compact" ${prefs.density==='compact'?'selected':''}>Compact</option>
         </select>
       </div>
-      <div class="actions">
-        <button class="btn" data-action="cancel">Cancel</button>
-        <button class="btn" id="resetLayout">Reset Layout</button>
-        <button class="btn primary" data-action="save">Save</button>
+      <div class="actions" style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn sm" data-action="cancel">Cancel</button>
+        <button class="btn sm" id="resetLayout">Reset Layout</button>
+        <button class="btn sm primary" data-action="save" id="g_save">Save</button>
       </div>
-    `;
-    openModal(html);
+    </div>`;
+  __openModal(html);
+  $("#g_save")?.addEventListener("click", ()=>{
+    const theme = $("#g_theme").value;
+    const density = $("#g_density").value;
+    prefs.theme = theme; prefs.density = density;
+    localStorage.setItem(K_PREFS, JSON.stringify(prefs));
+    document.body.classList.toggle('theme-ice', theme === 'ice');
+    document.body.classList.toggle('density-compact', density === 'compact');
+    __closeModal();
+  }, { once:true });
+  $("#resetLayout")?.addEventListener("click", ()=>{
+    localStorage.removeItem(K_SECTIONS);
+    localStorage.removeItem(K_VERSION);
+    navigator.serviceWorker?.getRegistrations?.().then(rs=>rs.forEach(r=>r.unregister()));
+    location.reload();
+  }, { once:true });
+});
 
-    $('#modal').addEventListener('click', (ev)=>{
-      const cancel = ev.target.closest('[data-action="cancel"]');
-      const save   = ev.target.closest('[data-action="save"]');
-      const reset  = ev.target.closest('#resetLayout');
-      if (cancel) closeModal();
-      if (reset) {
-        localStorage.removeItem(K_SECTIONS);
-        localStorage.removeItem(K_VERSION);
-        location.reload();
-      }
-      if (save) {
-        prefs.theme   = $('#g_theme').value;
-        prefs.density = $('#g_density').value;
-        localStorage.setItem(K_PREFS, JSON.stringify(prefs));
-        applyThemeAndDensity();
-        closeModal();
-      }
-    }, { once:true });
+/* -----------------------------
+   Modal helpers
+----------------------------- */
+(function modalSafetyNet(){
+  const modal = document.getElementById('modal');
+  const backdrop = document.getElementById('fsBackdrop');
+
+  function isOpen() {
+    return modal && !modal.classList.contains('hidden') && modal.classList.contains('show');
+  }
+  window.__openModal = window.__openModal || function(html){
+    if (!modal) return;
+    modal.innerHTML = html || modal.innerHTML;
+    modal.classList.remove('hidden');
+    modal.classList.add('show');
+    document.body.style.overflow = 'hidden';
+    if (backdrop) backdrop.classList.remove('show');
+  };
+  window.__closeModal = window.__closeModal || function(){
+    if (!modal) return;
+    modal.classList.add('hidden');
+    modal.classList.remove('show');
+    modal.innerHTML = '';
+    document.body.style.overflow = '';
+    if (backdrop) backdrop.classList.remove('show');
+  };
+
+  if (modal) {
+    modal.addEventListener('click', (e)=>{
+      if (e.target === modal) window.__closeModal();
+    });
+    modal.addEventListener('click', (e)=>{
+      const closeBtn = e.target.closest('[data-action="close"],[data-action="cancel"],[data-action="dismiss"]');
+      const saveBtn  = e.target.closest('[data-action="save"],[data-action="ok"],[data-action="apply"]');
+      if (closeBtn || saveBtn) window.__closeModal();
+    });
+  }
+  document.addEventListener('keydown', (e)=>{
+    if (e.key === 'Escape' && isOpen()) window.__closeModal();
   });
+})();
 
-  // Simple Add Tile: support a URL → web tile (kept minimal on purpose)
-  $('#addTileBtnTop')?.addEventListener('click', ()=>{
-    const url = prompt("Paste a URL to pin as a tile (or Cancel):");
-    if (!url) return;
-    let safe = url.trim();
-    if (!/^https?:\/\//i.test(safe)) safe = 'https://' + safe;
-    const t = {
-      id: uid(),
-      type: 'web',
-      title: (new URL(safe)).hostname,
-      meta: { url: safe },
-      content: '' // will be rendered by tileContentFor
-    };
-    t.content = tileContentFor(t);
-    sections.unshift(t);
-    localStorage.setItem(K_SECTIONS, JSON.stringify(sections));
-    render();
-  });
-}
-
-/* ===== Theme & Density ===== */
-function applyThemeAndDensity(){
-  document.body.classList.toggle('theme-ice', prefs.theme === 'ice');
-  // Density:
-  //  - compact = multi-column grid (old layout)
-  //  - comfortable = full-width cards
-  document.body.classList.toggle('density-compact',     prefs.density === 'compact');
-  document.body.classList.toggle('density-comfortable', prefs.density === 'comfortable');
-}
-
-/* ===== Init ===== */
-document.addEventListener('DOMContentLoaded', ()=>{
-  ensureShell();
+/* -----------------------------
+   Init
+----------------------------- */
+document.addEventListener("DOMContentLoaded", () => {
+  $("#yr") && ($("#yr").textContent = new Date().getFullYear());
   ensureVersion();
-  applyThemeAndDensity();
   updateAssistant();
-  bindChat();
-  bindGridEvents();
-  bindToolbar();
+  renderChat();
   render();
 });
