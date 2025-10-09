@@ -1,7 +1,8 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.11.1 (merge)
+   LifeCre8 — main.js  v1.11.2
    - Seed layout: single tile "Daily Brief"
-   - Keeps v1.11.0 features (AI Add-Tile, chat history, RSS, quotes, maps)
+   - Uses server-provided zoom for Maps tiles
+   - Titles for Maps = clean place name
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -58,7 +59,6 @@ let liveIntervals = {};
 const $  = q => document.querySelector(q);
 const $$ = q => Array.from(document.querySelectorAll(q));
 const uid = () => Math.random().toString(36).slice(2);
-const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
 
 const appEl = document.querySelector(".app");
@@ -74,9 +74,7 @@ if (!fsBackdrop) {
 /* -----------------------------
    YouTube helpers
 ----------------------------- */
-const YT_DEFAULTS = [
-  "M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk",
-];
+const YT_DEFAULTS = ["M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk"];
 const ytEmbedSrc = (id) => `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
 function ytPlaylistMarkup(playlist, currentId) {
   const ids = (playlist && playlist.length) ? playlist : YT_DEFAULTS;
@@ -105,7 +103,7 @@ function ytPlaylistMarkup(playlist, currentId) {
 }
 
 /* -----------------------------
-   Web tile (no embed toggle)
+   Web tile
 ----------------------------- */
 function webTileMarkup(url) {
   const host = hostOf(url);
@@ -130,13 +128,19 @@ function webTileMarkup(url) {
 }
 
 /* -----------------------------
-   Maps tile (travel intent)
+   Maps tile (server supplies zoom)
 ----------------------------- */
-function mapsTileMarkup(query){
-  const embed   = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
-  const open    = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
-  const booking = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(query)}`;
-  const trip    = `https://www.tripadvisor.com/Search?q=${encodeURIComponent(query)}`;
+function mapsTileMarkup(query, zoom){
+  let z = Number(zoom);
+  if (!Number.isFinite(z)) {
+    const words = (query||"").trim().split(/\s+/).length;
+    z = words <= 2 ? 5 : 11;
+  }
+  const q = encodeURIComponent(query);
+  const embed   = `https://www.google.com/maps?hl=en&q=${q}&z=${z}&output=embed`;
+  const open    = `https://www.google.com/maps/search/${q}`;
+  const booking = `https://www.booking.com/searchresults.html?ss=${q}`;
+  const trip    = `https://www.tripadvisor.com/Search?q=${q}`;
   return `
     <div data-maps>
       <div class="web-actions" style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap">
@@ -150,7 +154,7 @@ function mapsTileMarkup(query){
 }
 
 /* -----------------------------
-   RSS tile (enriched)
+   RSS tile
 ----------------------------- */
 function rssListMarkup(items) {
   const list = (items || []).map(i => `
@@ -302,7 +306,8 @@ function tileContentFor(section) {
     }
     case "maps": {
       const q = section.meta?.q || "nearby";
-      return mapsTileMarkup(q);
+      const z = section.meta?.zoom;
+      return mapsTileMarkup(q, z);
     }
     case "rss":  return section.content || rssLoadingMarkup();
     case "gallery": {
@@ -422,9 +427,13 @@ function render() {
         </div>`;
     } else if (s.type === "maps") {
       const q = s.meta?.q || "";
+      const z = s.meta?.zoom ?? "";
       fields = `
         <div class="field"><label>Maps search</label>
           <input class="input" id="set_maps_q" value="${q}">
+        </div>
+        <div class="field"><label>Zoom (2–18; lower = wider)</label>
+          <input class="input" id="set_maps_zoom" value="${z}">
         </div>`;
     } else if (s.type === "youtube") {
       const list = (s.meta?.playlist || YT_DEFAULTS).join(",");
@@ -499,8 +508,9 @@ function render() {
         s.content = webTileMarkup(url);
       } else if (s.type === "maps") {
         const q = $("#set_maps_q")?.value?.trim() || s.meta?.q || "";
-        s.meta = {...(s.meta||{}), q};
-        s.content = mapsTileMarkup(q);
+        const z = Number($("#set_maps_zoom")?.value);
+        s.meta = {...(s.meta||{}), q, zoom: Number.isFinite(z) ? z : s.meta?.zoom };
+        s.content = mapsTileMarkup(q, s.meta.zoom);
       } else if (s.type === "youtube") {
         const playlist = ($("#set_playlist")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
         const list = playlist.length? playlist : (s.meta?.playlist || YT_DEFAULTS);
@@ -613,7 +623,14 @@ tileSearch?.addEventListener("keydown", async (e)=>{
 
   let newTile = null;
   if (plan.type === "maps" && plan.q) {
-    newTile = { id: uid(), type: "maps", title: `Search — ${q}`, meta:{ q: plan.q }, content: mapsTileMarkup(plan.q) };
+    const niceTitle = (plan.title || q || 'Map').toString().replace(/^search\s*—\s*/i,'').trim() || 'Map';
+    newTile = {
+      id: uid(),
+      type: "maps",
+      title: niceTitle,
+      meta:{ q: plan.q, zoom: typeof plan.zoom === "number" ? plan.zoom : undefined },
+      content: mapsTileMarkup(plan.q, plan.zoom)
+    };
   } else if (plan.type === "web" && plan.url) {
     newTile = { id: uid(), type: "web", title: plan.title || hostOf(plan.url) || "Web", meta:{ url: plan.url }, content: webTileMarkup(plan.url) };
   } else if (plan.type === "youtube" && Array.isArray(plan.playlist) && plan.playlist.length) {
@@ -643,7 +660,7 @@ tileSearch?.addEventListener("keydown", async (e)=>{
 });
 
 /* -----------------------------
-   Assistant Toggle & Chat (standalone)
+   Assistant Toggle & Chat
 ----------------------------- */
 const assistantToggle = $("#assistantToggle");
 const assistantPanel  = $("#assistantPanel");
@@ -701,7 +718,7 @@ chatForm?.addEventListener("submit", async (e)=>{
 });
 
 /* -----------------------------
-   Global settings (Top button)
+   Global settings
 ----------------------------- */
 $("#globalSettingsBtn")?.addEventListener("click", ()=>{
   const html = `
