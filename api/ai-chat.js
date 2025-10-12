@@ -1,7 +1,7 @@
 // /api/ai-chat.js — v1.4
 // - Web lookups for BOTH GET and POST
 // - Force web via `mode=web` (GET) or `/search ...` (text)
-// - Clear 'mode' + 'version' in JSON for quick sanity checks
+// - Returns 'mode' + 'version' in JSON so you can sanity-check
 
 export const config = { runtime: "edge" };
 
@@ -28,24 +28,12 @@ function toOpenAIMessages(history = [], latestText = "") {
   return msgs;
 }
 
-// Heuristics for when to browse
 function needsWeb(q = "") {
   const s = q.toLowerCase().trim();
-
-  // explicit command
   if (/^\/search\s+/.test(s)) return true;
-
-  // time / now
   if (/\b(current time|time\s+(in|at)\s+\S+.*(now|right now)?|time\s+now|right now)\b/.test(s)) return true;
-
-  // recency signals
-  if (/\b(latest|today|this week|this month|breaking|update|news|score|fixtures|schedule|price now|live price|live score)\b/.test(s)) {
-    return true;
-  }
-
-  // explicit recent years
+  if (/\b(latest|today|this week|this month|breaking|update|news|score|fixtures|schedule|price now|live price|live score)\b/.test(s)) return true;
   if (/\b20(2[3-9]|3\d)\b/.test(s)) return true;
-
   return false;
 }
 
@@ -96,10 +84,7 @@ async function answerWithWebThenLLM(query) {
   if (web.ok && web.results.length) {
     const context = web.results.map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}`).join("\n\n");
     const msgs = [
-      {
-        role: "system",
-        content: "Summarize briefly and cite with bracket numbers like [1], [2]. If asked for actions, provide short bullet points.",
-      },
+      { role: "system", content: "Summarize briefly and cite with bracket numbers like [1], [2]. If asked for actions, provide short bullet points." },
       { role: "user", content: `Question: ${query}\n\nSources:\n${context}` },
     ];
     const result = await callOpenAI(msgs, "web+llm");
@@ -116,21 +101,17 @@ async function answerWithWebThenLLM(query) {
       }),
     };
   }
-  // Search failed → fall back to LLM-only
   const msgs = toOpenAIMessages([], query);
-  const res = await callOpenAI(msgs, "llm-only");
-  return res;
+  return await callOpenAI(msgs, "llm-only");
 }
 
 async function handleQuery(userQ, history, forceWeb = false) {
   const q = (userQ || "").trim();
   const wantsWeb = forceWeb || needsWeb(q);
-
   if (wantsWeb && OPENAI_API_KEY) {
     const query = q.replace(/^\/search\s+/i, "").trim() || q;
     return await answerWithWebThenLLM(query);
   }
-
   const msgs = toOpenAIMessages(Array.isArray(history) ? history : [], q);
   return await callOpenAI(msgs, "llm-only");
 }
@@ -142,18 +123,14 @@ export default async function handler(req) {
       const res = await handleQuery(q, history, !!forceWeb);
       return new Response(res.body, { status: res.status, headers: { "Content-Type": "application/json" } });
     }
-
-    // GET mode (now supports web too)
     const { searchParams } = new URL(req.url);
     const q = searchParams.get("q") || "";
-    const modeParam = (searchParams.get("mode") || "").toLowerCase(); // e.g. mode=web
-    const forceWeb = modeParam === "web";
+    const forceWeb = (searchParams.get("mode") || "").toLowerCase() === "web";
     const res = await handleQuery(q, [], forceWeb);
     return new Response(res.body, { status: res.status, headers: { "Content-Type": "application/json" } });
   } catch (err) {
     return new Response(JSON.stringify({ message: "Chat crashed.", error: String(err), version: "1.4" }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" },
+      status: 500, headers: { "Content-Type": "application/json" },
     });
   }
 }
