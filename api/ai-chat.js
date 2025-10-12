@@ -1,7 +1,9 @@
-// /api/ai-chat.js — v1.7
-// - Detects compact queries like "new york time?"
-// - Correct timezone formatting via Intl.DateTimeFormat({ timeZone })
-// - Dual time providers with timeout (WorldTimeAPI -> TimeAPI.io) before any web fallback
+// /api/ai-chat.js — v1.8
+// - Handles "time in <city>" and now **time differences** like:
+//     "time difference - london and new york"
+//     "what is the time difference from gmt to new york"
+// - Correct TZ formatting via Intl.DateTimeFormat({ timeZone })
+// - Dual time providers with timeout (WorldTimeAPI -> TimeAPI.io)
 // - Deterministic capability reply
 // - Web lookups on GET/POST when needed
 // - Returns {message, mode, version}
@@ -54,26 +56,36 @@ const TZ_MAP = {
   "tokyo":"Asia/Tokyo","sydney":"Australia/Sydney","auckland":"Pacific/Auckland",
   "singapore":"Asia/Singapore","hong kong":"Asia/Hong_Kong"
 };
-function guessTZ(q=""){
-  const s = q.toLowerCase();
+function guessTZFromText(s=""){
+  const txt = s.toLowerCase();
   const keys = Object.keys(TZ_MAP).sort((a,b)=>b.length-a.length);
-  for (const k of keys) if (s.includes(k)) return TZ_MAP[k];
+  for (const k of keys) if (txt.includes(k)) return TZ_MAP[k];
   return null;
 }
 
-// v1.7: catch compact forms like "new york time?" and "nyc time now"
+// Basic time question ("new york time?", "time in london")
 function isTimeQ(q=""){
   const s = q.toLowerCase().trim();
   if (/\b(time now|current time|what(?:'| i)?s the time)\b/i.test(s)) return true;
-  if (/\btime\b/.test(s) && guessTZ(s)) return true;            // "<city> time" or "time <city>"
-  if (/^[a-z\s,'-]+time\??$/.test(s) && guessTZ(s)) return true; // ends with "time?"
-  if (/^time\s+(in|at)\s+/.test(s)) return true;                 // "time in <city>"
+  if (/\btime\b/.test(s) && guessTZFromText(s)) return true;
+  if (/^[a-z\s,'-]+time\??$/.test(s) && guessTZFromText(s)) return true;
+  if (/^time\s+(in|at)\s+/.test(s)) return true;
+  return false;
+}
+
+// NEW: time difference request
+function isTimeDiffQ(q=""){
+  const s = q.toLowerCase();
+  if (/\b(time\s*difference|difference in time|time offset|offset)\b/.test(s)) return true;
+  if (/\b(ahead of|behind)\b/.test(s)) return true;
+  if (/\bfrom\s+(gmt|utc)\b/.test(s)) return true;
+  if (/\bbetween\b/.test(s) && /\band\b/.test(s) && /\btime\b/.test(s)) return true;
   return false;
 }
 
 function capabilityAnswer(){
-  if (TAVILY_API_KEY) return json({ message:"Yes — I can do live web lookups when needed (e.g., “today”, “latest”) or if you use /search.", mode:"capability", version:"1.7" });
-  return json({ message:"I can answer normally. To enable live web lookups, add TAVILY_API_KEY on the server.", mode:"capability-no-search-key", version:"1.7" });
+  if (TAVILY_API_KEY) return json({ message:"Yes — I can do live web lookups when needed (e.g., “today”, “latest”) or if you use /search.", mode:"capability", version:"1.8" });
+  return json({ message:"I can answer normally. To enable live web lookups, add TAVILY_API_KEY on the server.", mode:"capability-no-search-key", version:"1.8" });
 }
 
 /* ---------- time providers ---------- */
@@ -86,7 +98,7 @@ async function fetchWorldTime(tz){
   const r = await abortableFetch(`https://worldtimeapi.org/api/timezone/${encodeURIComponent(tz)}`, { headers:{ "cache-control":"no-cache" }});
   if (!r.ok) throw new Error(`wta ${r.status}`);
   const j = await r.json();
-  return { iso: j.datetime, utcOffset: j.utc_offset }; // ISO-with-offset
+  return { iso: j.datetime, utcOffset: j.utc_offset }; // ISO-with-offset, e.g. 2025-10-07T12:00:00-04:00
 }
 async function fetchTimeApiIO(tz){
   const r = await abortableFetch(`https://timeapi.io/api/Time/current/zone?timeZone=${encodeURIComponent(tz)}`, { headers:{ "cache-control":"no-cache" }});
@@ -104,20 +116,82 @@ function formatInZone(iso, tz){
   });
   return fmt.format(dt);
 }
+function offsetMinutesFromString(utcOffset="+00:00"){
+  const m = utcOffset.match(/([+-])(\d{2}):?(\d{2})?/);
+  if (!m) return 0;
+  const sign = m[1] === "-" ? -1 : 1;
+  const h = parseInt(m[2],10)||0;
+  const mm = parseInt(m[3]||"0",10)||0;
+  return sign*(h*60+mm);
+}
+
+/* ---------- answers ---------- */
 async function answerTime(q){
-  const tz = guessTZ(q);
-  if (!tz) return json({ message:"Tell me the city (e.g., “time in New York now?”) and I’ll give you the exact local time.", mode:"time-need-city", version:"1.7" });
+  const tz = guessTZFromText(q);
+  if (!tz) return json({ message:"Tell me the city (e.g., “time in New York now?”) and I’ll give you the exact local time.", mode:"time-need-city", version:"1.8" });
 
   try {
     let data;
     try { data = await fetchWorldTime(tz); }
     catch { data = await fetchTimeApiIO(tz); }
-    const pretty = formatInZone(data.iso, tz); // show in requested TZ (not user's)
+    const pretty = formatInZone(data.iso, tz); // show in requested TZ
     const city = tz.split('/').pop().replace(/_/g,' ');
-    return json({ message:`${city}: ${pretty}`, mode:"time-api", version:"1.7" });
+    return json({ message:`${city}: ${pretty}`, mode:"time-api", version:"1.8" });
   } catch {
-    // last resort: web+llm summary
     return await answerWithWebThenLLM(`current local time in ${tz}`);
+  }
+}
+
+function extractTwoZones(q=""){
+  const s = q.toLowerCase();
+  // Try to find two known cities
+  const hits = [];
+  for (const key of Object.keys(TZ_MAP).sort((a,b)=>b.length-a.length)) {
+    if (s.includes(key)) hits.push(TZ_MAP[key]);
+  }
+  // De-duplicate while keeping order
+  const uniq = [...new Set(hits)];
+  // Support GMT/UTC as one side
+  if (/\bgmt\b/.test(s) || /\butc\b/.test(s)) {
+    if (!uniq.includes("Etc/UTC")) uniq.push("Etc/UTC");
+  }
+  return uniq.slice(0,2);
+}
+
+async function answerTimeDiff(q){
+  const pair = extractTwoZones(q);
+  if (pair.length < 2) {
+    // If only one city + "from GMT/UTC" phrasing wasn't caught, try fallback grammar "X and Y"
+    return json({ message:"Tell me both places, e.g., “time difference London and New York” or “difference from GMT to New York”.", mode:"time-diff-need-two", version:"1.8" });
+  }
+  const [tzA, tzB] = pair;
+
+  try {
+    let a, b;
+    try { a = await fetchWorldTime(tzA); } catch { a = await fetchTimeApiIO(tzA); }
+    try { b = await fetchWorldTime(tzB); } catch { b = await fetchTimeApiIO(tzB); }
+
+    const aOff = offsetMinutesFromString(a.utcOffset || "+00:00");
+    const bOff = offsetMinutesFromString(b.utcOffset || "+00:00");
+    const diffMin = bOff - aOff; // how much B differs from A
+    const absMin = Math.abs(diffMin);
+    const hours = Math.floor(absMin/60);
+    const mins  = absMin % 60;
+
+    const aName = tzA.split('/').pop().replace(/_/g,' ');
+    const bName = tzB.split('/').pop().replace(/_/g,' ');
+
+    const dir = diffMin === 0 ? "the same time as" : (diffMin > 0 ? "ahead of" : "behind");
+    const span = absMin === 0 ? "" : (mins ? `${hours}h ${mins}m` : `${hours}h`);
+
+    const msg = diffMin === 0
+      ? `${bName} is ${dir} ${aName} (UTC offsets are equal right now).`
+      : `${bName} is ${span} ${dir} ${aName}.`;
+
+    return json({ message: msg, mode:"time-diff", version:"1.8" });
+  } catch {
+    // last resort: web
+    return await answerWithWebThenLLM(q);
   }
 }
 
@@ -135,7 +209,7 @@ async function webSearch(query){
   return { ok:true, results };
 }
 async function callOpenAI(messages, mode="llm-only"){
-  if (!OPENAI_API_KEY) return json({ message:"Chat is running in demo mode (no OPENAI_API_KEY set).", mode:"llm-demo", version:"1.7" });
+  if (!OPENAI_API_KEY) return json({ message:"Chat is running in demo mode (no OPENAI_API_KEY set).", mode:"llm-demo", version:"1.8" });
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method:"POST",
     headers:{ Authorization:`Bearer ${OPENAI_API_KEY}`, "Content-Type":"application/json" },
@@ -143,11 +217,11 @@ async function callOpenAI(messages, mode="llm-only"){
   });
   if (!res.ok) {
     const detail = await res.text().catch(()=> "");
-    return json({ message:"Chat failed.", detail, mode, version:"1.7" }, 500);
+    return json({ message:"Chat failed.", detail, mode, version:"1.8" }, 500);
   }
   const data = await res.json().catch(()=>null);
   const message = data?.choices?.[0]?.message?.content?.trim() || "I couldn't generate a reply just now.";
-  return json({ message, mode, version:"1.7" });
+  return json({ message, mode, version:"1.8" });
 }
 async function answerWithWebThenLLM(query){
   const web = await webSearch(query);
@@ -159,9 +233,9 @@ async function answerWithWebThenLLM(query){
     ];
     const r = await callOpenAI(msgs, "web+llm");
     const b = await r.json();
-    return json({ message:b.message, mode:"web+llm", version:"1.7" });
+    return json({ message:b.message, mode:"web+llm", version:"1.8" });
   }
-  if (!web.ok && web.reason === "no-key") return json({ message:"Web search is not enabled on this server (missing TAVILY_API_KEY).", mode:"llm-no-search-key", version:"1.7" });
+  if (!web.ok && web.reason === "no-key") return json({ message:"Web search is not enabled on this server (missing TAVILY_API_KEY).", mode:"llm-no-search-key", version:"1.8" });
   const msgs = toOpenAIMessages([], query);
   return await callOpenAI(msgs, "llm-only");
 }
@@ -170,7 +244,9 @@ async function answerWithWebThenLLM(query){
 async function handleQuery(qRaw, history, forceWeb=false){
   const q = (qRaw || "").trim();
   if (isCapabilityQ(q)) return capabilityAnswer();
-  if (isTimeQ(q)) return await answerTime(q);
+  if (isTimeDiffQ(q))    return await answerTimeDiff(q);
+  if (isTimeQ(q))        return await answerTime(q);
+
   const wantsWeb = forceWeb || needsWeb(q);
   if (wantsWeb && OPENAI_API_KEY) {
     const query = q.replace(/^\/search\s+/i,'').trim() || q;
@@ -191,6 +267,6 @@ export default async function handler(req) {
     const forceWeb = (searchParams.get("mode") || "").toLowerCase() === "web";
     return await handleQuery(q, [], forceWeb);
   } catch (err) {
-    return json({ message:"Chat crashed.", error:String(err), version:"1.7" }, 500);
+    return json({ message:"Chat crashed.", error:String(err), version:"1.8" }, 500);
   }
 }
