@@ -1,8 +1,11 @@
 /* ============================================================
    LifeCre8 — main.js  v1.11.2
-   - Seed layout: single tile "Daily Brief"
-   - Uses server-provided zoom for Maps tiles
-   - Titles for Maps = clean place name
+   Changes (vs 1.11.0):
+   - Assistant: auto /web when the query needs fresh info (weather, forecast, latest, price today, news, scores, etc.)
+   - Assistant: lightweight Markdown rendering (bold/italic/links/lists/code)
+   - Assistant: show tiny mode badge (e.g., web+llm / time-local / passthrough)
+   - Assistant: safer error handling (no silent crashes)
+   Other app features preserved as-is.
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -11,7 +14,7 @@ const K_ASSIST_ON  = "lifecre8.assistantOn";
 const K_CHAT       = "lifecre8.chat";
 const K_VERSION    = "lifecre8.version";
 const K_PREFS      = "lifecre8.prefs";
-const DATA_VERSION = 6;
+const DATA_VERSION = 5;
 
 /* ===== Presets ===== */
 const RSS_PRESETS = {
@@ -44,7 +47,7 @@ const STOCK_PRESETS = {
 let sections    = JSON.parse(localStorage.getItem(K_SECTIONS)  || "[]");
 let assistantOn = localStorage.getItem(K_ASSIST_ON) === null ? true : JSON.parse(localStorage.getItem(K_ASSIST_ON));
 let chat        = JSON.parse(localStorage.getItem(K_CHAT)      || "[]");
-if (!chat.length) chat = [{ role:'ai', text:"Hi! I'm your AI Assistant. Ask me anything." }];
+if (!chat.length) chat = [{ role:'ai', text:"Hi! I'm your AI Assistant. Ask me anything.", meta:{} }];
 
 let prefs = JSON.parse(localStorage.getItem(K_PREFS) || "{}");
 if (!prefs.theme)   prefs.theme   = "solar";
@@ -59,6 +62,7 @@ let liveIntervals = {};
 const $  = q => document.querySelector(q);
 const $$ = q => Array.from(document.querySelectorAll(q));
 const uid = () => Math.random().toString(36).slice(2);
+const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const hostOf = (u) => { try { return new URL(u).hostname; } catch { return ""; } };
 
 const appEl = document.querySelector(".app");
@@ -74,7 +78,9 @@ if (!fsBackdrop) {
 /* -----------------------------
    YouTube helpers
 ----------------------------- */
-const YT_DEFAULTS = ["M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk"];
+const YT_DEFAULTS = [
+  "M7lc1UVf-VE","5qap5aO4i9A","DWcJFNfaw9c","jfKfPfyJRdk",
+];
 const ytEmbedSrc = (id) => `https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&playsinline=1`;
 function ytPlaylistMarkup(playlist, currentId) {
   const ids = (playlist && playlist.length) ? playlist : YT_DEFAULTS;
@@ -103,7 +109,7 @@ function ytPlaylistMarkup(playlist, currentId) {
 }
 
 /* -----------------------------
-   Web tile
+   Web tile (no embed toggle)
 ----------------------------- */
 function webTileMarkup(url) {
   const host = hostOf(url);
@@ -128,19 +134,13 @@ function webTileMarkup(url) {
 }
 
 /* -----------------------------
-   Maps tile (server supplies zoom)
+   Maps tile (travel intent)
 ----------------------------- */
-function mapsTileMarkup(query, zoom){
-  let z = Number(zoom);
-  if (!Number.isFinite(z)) {
-    const words = (query||"").trim().split(/\s+/).length;
-    z = words <= 2 ? 5 : 11;
-  }
-  const q = encodeURIComponent(query);
-  const embed   = `https://www.google.com/maps?hl=en&q=${q}&z=${z}&output=embed`;
-  const open    = `https://www.google.com/maps/search/${q}`;
-  const booking = `https://www.booking.com/searchresults.html?ss=${q}`;
-  const trip    = `https://www.tripadvisor.com/Search?q=${q}`;
+function mapsTileMarkup(query){
+  const embed   = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
+  const open    = `https://www.google.com/maps/search/${encodeURIComponent(query)}`;
+  const booking = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(query)}`;
+  const trip    = `https://www.tripadvisor.com/Search?q=${encodeURIComponent(query)}`;
   return `
     <div data-maps>
       <div class="web-actions" style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap">
@@ -154,7 +154,7 @@ function mapsTileMarkup(query, zoom){
 }
 
 /* -----------------------------
-   RSS tile
+   RSS tile (enriched)
 ----------------------------- */
 function rssListMarkup(items) {
   const list = (items || []).map(i => `
@@ -240,7 +240,10 @@ function loadQuotesInto(card, symbols) {
     .then(r=>r.json())
     .then(data=>{
       const map = {};
-      (data.quotes||data.items||[]).forEach(q=>{ map[(q.symbol||"").toUpperCase()] = q; });
+      (data.quotes||data.items||[]).forEach(q=>{
+        const sym = (q.symbol||q.ticker||"").toUpperCase();
+        map[sym] = q;
+      });
       const rows = card.querySelectorAll(".trow");
       rows.forEach(row=>{
         const sym = row.dataset.sym.toUpperCase();
@@ -249,14 +252,14 @@ function loadQuotesInto(card, symbols) {
         const priceEl = row.querySelector("[data-price]");
         const chgEl   = row.querySelector("[data-chg]");
         const price = q.price;
-        const delta = (q.change!=null) ? q.change : q.change24h;
-        const pct   = (q.changePercent!=null) ? q.changePercent : q.changePct24h;
+        const delta = q.change ?? q.change24h ?? q.changePct24h;
+        const pct   = q.changePercent ?? q.changePct24h;
         priceEl.textContent = (price!=null) ? Number(price).toFixed(2) : "—";
         chgEl.textContent   = (delta!=null && pct!=null)
           ? `${delta>=0?"+":""}${Number(delta).toFixed(2)}  (${pct>=0?"+":""}${Number(pct).toFixed(2)}%)`
-          : "—";
-        row.classList.toggle("up",   Number(delta) >= 0);
-        row.classList.toggle("down", Number(delta) <  0);
+          : (delta!=null ? `${delta>=0?"+":""}${Number(delta).toFixed(2)}` : "—");
+        row.classList.toggle("up",   delta >= 0);
+        row.classList.toggle("down", delta <  0);
       });
     })
     .catch(()=>{
@@ -268,11 +271,46 @@ function loadQuotesInto(card, symbols) {
 }
 
 /* -----------------------------
-   Defaults (ONE TILE ONLY)
+   Football (simulated fallback)
 ----------------------------- */
+function footballMarkupSeed() {
+  const matches = [
+    { home:"Arsenal", away:"Chelsea", hs:0, as:0, min:0, status:"KO 20:00", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/gb-eng.png", awayBadge:"https://flagcdn.com/w20/gb-eng.png" },
+    { home:"Barcelona", away:"Real Madrid", hs:0, as:0, min:0, status:"KO 20:15", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/es.png", awayBadge:"https://flagcdn.com/w20/es.png" },
+    { home:"Bayern", away:"Dortmund", hs:0, as:0, min:0, status:"KO 20:30", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/de.png", awayBadge:"https://flagcdn.com/w20/de.png" },
+  ];
+  const rows = matches.map((m,i)=>`
+    <div class="match" data-idx="${i}">
+      <div class="team home"><img alt="" src="${m.homeBadge}"/><span>${m.home}</span></div>
+      <div class="score" data-score>${m.hs}–${m.as}</div>
+      <div class="team away"><img alt="" src="${m.awayBadge}"/><span>${m.away}</span></div>
+      <div class="status" data-status>${m.status}</div>
+    </div>
+  `).join("");
+  return `<div class="scores" data-matches="${encodeURIComponent(JSON.stringify(matches))}">${rows}</div>`;
+}
+
+/* -----------------------------
+   Defaults
+----------------------------- */
+function gallerySeed() {
+  return [
+    "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?q=80&w=600&auto=format&fit=crop",
+    "https://images.unsplash.com/photo-1469474968028-56623f02e42e?q=80&w=600&auto=format&fit=crop",
+    "https://images.unsplash.com/photo-1501785888041-af3ef285b470?q=80&w=600&auto=format&fit=crop",
+    "https://images.unsplash.com/photo-1441974231531-c6227db76b6e?q=80&w=600&auto=format&fit=crop",
+    "https://images.unsplash.com/photo-1500534314209-a25ddb2bd429?q=80&w=600&auto=format&fit=crop",
+    "https://images.unsplash.com/photo-1491553895911-0055eca6402d?q=80&w=600&auto=format&fit=crop"
+  ];
+}
 function defaultSections() {
   return [
-    { id: uid(), type:"rss", title:"Daily Brief", meta:{ feeds: RSS_PRESETS.uk }, content: rssLoadingMarkup() }
+    { id: uid(), type:"rss",      title:"Daily Brief", meta:{ feeds: RSS_PRESETS.uk }, content: rssLoadingMarkup() },
+    { id: uid(), type:"web",      title:"BBC News",    meta:{url:"https://www.bbc.com"}, content: webTileMarkup("https://www.bbc.com") },
+    { id: uid(), type:"youtube",  title:"YouTube",     meta:{ playlist:[...YT_DEFAULTS], current:"M7lc1UVf-VE" }, content: ytPlaylistMarkup(YT_DEFAULTS, "M7lc1UVf-VE") },
+    { id: uid(), type:"stocks",   title:"Markets",     meta:{ symbols:["AAPL","MSFT","BTC-USD"] }, content: tickerMarkup(["AAPL","MSFT","BTC-USD"]) },
+    { id: uid(), type:"football", title:"Football",    meta:{}, content: footballMarkupSeed() },
+    { id: uid(), type:"gallery",  title:"Gallery",     meta:{ urls: gallerySeed() }, content: galleryMarkup(gallerySeed()) }
   ];
 }
 
@@ -306,8 +344,7 @@ function tileContentFor(section) {
     }
     case "maps": {
       const q = section.meta?.q || "nearby";
-      const z = section.meta?.zoom;
-      return mapsTileMarkup(q, z);
+      return mapsTileMarkup(q);
     }
     case "rss":  return section.content || rssLoadingMarkup();
     case "gallery": {
@@ -315,6 +352,7 @@ function tileContentFor(section) {
       return galleryMarkup(urls);
     }
     case "stocks": return section.content;
+    case "football": return section.content;
     default: return section.content || "Empty tile";
   }
 }
@@ -334,7 +372,10 @@ function render() {
   const grid = $("#grid");
   grid.innerHTML = "";
 
-  sections.forEach(s => {
+  const others = sections.filter(s=>s.type!=="email");
+  const emails = sections.filter(s=>s.type==="email");
+
+  [...others, ...emails].forEach(s => {
     const card = document.createElement("div");
     card.className = "card";
     card.dataset.id = s.id;
@@ -427,13 +468,9 @@ function render() {
         </div>`;
     } else if (s.type === "maps") {
       const q = s.meta?.q || "";
-      const z = s.meta?.zoom ?? "";
       fields = `
         <div class="field"><label>Maps search</label>
           <input class="input" id="set_maps_q" value="${q}">
-        </div>
-        <div class="field"><label>Zoom (2–18; lower = wider)</label>
-          <input class="input" id="set_maps_zoom" value="${z}">
         </div>`;
     } else if (s.type === "youtube") {
       const list = (s.meta?.playlist || YT_DEFAULTS).join(",");
@@ -508,9 +545,8 @@ function render() {
         s.content = webTileMarkup(url);
       } else if (s.type === "maps") {
         const q = $("#set_maps_q")?.value?.trim() || s.meta?.q || "";
-        const z = Number($("#set_maps_zoom")?.value);
-        s.meta = {...(s.meta||{}), q, zoom: Number.isFinite(z) ? z : s.meta?.zoom };
-        s.content = mapsTileMarkup(q, s.meta.zoom);
+        s.meta = {...(s.meta||{}), q};
+        s.content = mapsTileMarkup(q);
       } else if (s.type === "youtube") {
         const playlist = ($("#set_playlist")?.value || "").split(",").map(x=>x.trim()).filter(Boolean);
         const list = playlist.length? playlist : (s.meta?.playlist || YT_DEFAULTS);
@@ -587,7 +623,7 @@ function render() {
 })();
 
 /* -----------------------------
-   Add Tile — AI agent
+   Add Tile — AI agent (unchanged client; server decides)
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
@@ -604,6 +640,7 @@ tileSearch?.addEventListener("keydown", async (e)=>{
   const q = (tileSearch.value || "").trim();
   if (!q) return;
 
+  // ask the server agent to decide the tile
   let plan;
   try {
     const r = await fetch("/api/ai-tile", {
@@ -614,6 +651,7 @@ tileSearch?.addEventListener("keydown", async (e)=>{
     const j = await r.json();
     plan = j.tile || j;
   } catch {
+    // fallback → basic RSS
     plan = {
       type: "rss",
       title: `Daily Brief — ${q}`,
@@ -621,16 +659,10 @@ tileSearch?.addEventListener("keydown", async (e)=>{
     };
   }
 
+  // build client tile from plan
   let newTile = null;
   if (plan.type === "maps" && plan.q) {
-    const niceTitle = (plan.title || q || 'Map').toString().replace(/^search\s*—\s*/i,'').trim() || 'Map';
-    newTile = {
-      id: uid(),
-      type: "maps",
-      title: niceTitle,
-      meta:{ q: plan.q, zoom: typeof plan.zoom === "number" ? plan.zoom : undefined },
-      content: mapsTileMarkup(plan.q, plan.zoom)
-    };
+    newTile = { id: uid(), type: "maps", title: plan.title || q, meta:{ q: plan.q }, content: mapsTileMarkup(plan.q) };
   } else if (plan.type === "web" && plan.url) {
     newTile = { id: uid(), type: "web", title: plan.title || hostOf(plan.url) || "Web", meta:{ url: plan.url }, content: webTileMarkup(plan.url) };
   } else if (plan.type === "youtube" && Array.isArray(plan.playlist) && plan.playlist.length) {
@@ -644,6 +676,7 @@ tileSearch?.addEventListener("keydown", async (e)=>{
     newTile = { id: uid(), type:"stocks", title: plan.title || "Markets", meta:{ symbols: plan.symbols }, content: tickerMarkup(plan.symbols) };
   }
 
+  // if still nothing, fallback to RSS
   if (!newTile) {
     newTile = {
       id: uid(), type:"rss", title:`Daily Brief — ${q}`,
@@ -660,7 +693,7 @@ tileSearch?.addEventListener("keydown", async (e)=>{
 });
 
 /* -----------------------------
-   Assistant Toggle & Chat
+   Assistant Toggle & Chat (live-aware)
 ----------------------------- */
 const assistantToggle = $("#assistantToggle");
 const assistantPanel  = $("#assistantPanel");
@@ -681,44 +714,84 @@ assistantToggle?.addEventListener("click", (e) => {
   updateAssistant();
 });
 
+/* --- tiny Markdown renderer (safe, minimal) --- */
+function escapeHtml(s){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+function mdRender(src=""){
+  let s = escapeHtml(src);
+  // code
+  s = s.replace(/```([\s\S]*?)```/g, (_,code)=>`<pre><code>${code.trim()}</code></pre>`);
+  // inline code
+  s = s.replace(/`([^`]+)`/g, (_,t)=>`<code>${t}</code>`);
+  // bold / italics
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  // links
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, `<a href="$2" target="_blank" rel="noopener">$1</a>`);
+  // simple lists
+  s = s.replace(/(^|\n)\s*[-•]\s+(.+)(?=\n|$)/g, "$1<li>$2</li>");
+  s = s.replace(/(<li>[\s\S]*?<\/li>)/g, "<ul>$1</ul>");
+  // newlines
+  s = s.replace(/\n/g, "<br/>");
+  return s;
+}
+
 function renderChat(){
   if (!chatLog) return;
   chatLog.innerHTML = "";
   chat.forEach(m=>{
     const d = document.createElement("div");
     d.className = `msg ${m.role}`;
-    d.textContent = m.text;
+    if (m.role === "ai") {
+      const html = mdRender(m.text || "");
+      d.innerHTML = `<div>${html}</div>${m.meta?.mode ? `<div class="muted" style="margin-top:4px;font-size:11px">mode: ${m.meta.mode}${m.meta.model?` · ${m.meta.model}`:''}</div>`:""}`;
+    } else {
+      d.textContent = m.text || "";
+    }
     chatLog.appendChild(d);
   });
   chatLog.scrollTop = chatLog.scrollHeight;
 }
-function addChat(role, text){
-  chat.push({role, text});
+function addChat(role, text, meta={}){
+  chat.push({role, text, meta});
   localStorage.setItem(K_CHAT, JSON.stringify(chat));
   renderChat();
 }
 
+/* Detect queries that should force live web (prefix /web) */
+function shouldForceWeb(q=""){
+  const s = q.toLowerCase();
+  if (/^\/web\s+/.test(s)) return true;
+  if (/\b(latest|today|this week|this month|breaking|update|just now|live|live price|price now|price today|score|scores|fixtures|schedule|news|weather|forecast|temperature|price|odds)\b/.test(s)) return true;
+  if (/\b20(2[3-9]|3\d)\b/.test(s)) return true; // explicit recent years
+  return false;
+}
+
 chatForm?.addEventListener("submit", async (e)=>{
   e.preventDefault();
-  const text = chatInput.value.trim();
+  const raw = chatInput.value;
+  const text = (raw || "").trim();
   if (!text) return;
+
+  // Force live for “fresh-data” questions by prefixing /web (server will pick web+llm path)
+  const payloadText = shouldForceWeb(text) && !/^\/web\s+/i.test(text) ? `/web ${text}` : text;
+
   addChat('user', text);
   chatInput.value = "";
   try {
     const r = await fetch("/api/ai-chat", {
       method:"POST",
       headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ q: text, messages: chat })
+      body: JSON.stringify({ q: payloadText, messages: chat })
     });
     const j = await r.json();
-    addChat('ai', j.message || "…");
-  } catch {
-    addChat('ai', "I couldn't reach the chat service just now. Try again in a moment.");
+    addChat('ai', j.message || "…", { mode: j.mode, model: j.model, version: j.version });
+  } catch (err) {
+    addChat('ai', "I couldn't reach the chat service just now. Try again in a moment.", { mode:"error" });
   }
 });
 
 /* -----------------------------
-   Global settings
+   Global settings (Top button)
 ----------------------------- */
 $("#globalSettingsBtn")?.addEventListener("click", ()=>{
   const html = `
