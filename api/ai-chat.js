@@ -1,9 +1,8 @@
-// /api/ai-chat.js — v2.2
+// /api/ai-chat.js — v2.3
 // - Default: passthrough to OpenAI (plain chat).
 // - Live web: auto-use Tavily for fresh info (or if query starts with "/web "),
 //   then summarize with OpenAI (mode: "web+llm").
-// - Time in <city> & time difference (A vs B): **no network calls**.
-//   Uses Intl timezone data to format time and compute UTC offsets (DST-aware).
+// - Time in <city> & time difference (A vs B): **no network calls** (Intl/ICU).
 // - Always returns { message, mode, model, version }.
 
 export const config = { runtime: "edge" };
@@ -46,7 +45,7 @@ async function callOpenAI(messages, mode = "passthrough") {
         "Chat is in demo mode (no OPENAI_API_KEY set on the server). Add it in Vercel → Settings → Environment Variables.",
       mode: mode === "web+llm" ? "web+llm-demo" : "passthrough-demo",
       model: OPENAI_MODEL,
-      version: "2.2",
+      version: "2.3",
     });
   }
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -60,7 +59,7 @@ async function callOpenAI(messages, mode = "passthrough") {
   if (!r.ok) {
     const detail = await r.text().catch(() => "");
     return json(
-      { message: "Chat failed.", detail, mode, model: OPENAI_MODEL, version: "2.2" },
+      { message: "Chat failed.", detail, mode, model: OPENAI_MODEL, version: "2.3" },
       500
     );
   }
@@ -68,20 +67,31 @@ async function callOpenAI(messages, mode = "passthrough") {
   const message =
     j?.choices?.[0]?.message?.content?.trim() ||
     "I couldn't generate a reply just now.";
-  return json({ message, mode, model: OPENAI_MODEL, version: "2.2" });
+  return json({ message, mode, model: OPENAI_MODEL, version: "2.3" });
 }
 
 /* ---------------- live web (Tavily) ---------------- */
 function wantsWeb(q = "") {
   const s = q.toLowerCase().trim();
   if (/^\/web\s+/.test(s)) return true;
-  if (
-    /\b(latest|today|this week|this month|breaking|update|just now|live|live price|price now|price today|score|fixtures|schedule|news)\b/.test(
-      s
-    )
-  )
-    return true;
-  if (/\b20(2[3-9]|3\d)\b/.test(s)) return true; // explicit recent years
+
+  // Fresh/real-time cues
+  const realtimeRe =
+    /\b(latest|today|tonight|this week|this month|breaking|update|just now|live|live price|price now|price today|now|currently|forecast|weather|temperature|rain|snow|wind|score|scores|fixtures|schedule|result|results|odds|lineup|transfer|news)\b/;
+  if (realtimeRe.test(s)) return true;
+
+  // Transport / timetables (your train example)
+  const transportRe =
+    /\b(train|next train|timetable|times|schedule|departures?|arrivals?|platform|delays?|status|tube|metro|bus|tram|flight|flights)\b/;
+  if (transportRe.test(s)) return true;
+
+  // Finance
+  const financeRe = /\b(stock|share|price|market|crypto|bitcoin|ethereum|eth|btc)\b/;
+  if (financeRe.test(s) && /\b(now|today|latest|live)\b/.test(s)) return true;
+
+  // Explicit recent years often imply news/freshness
+  if (/\b20(2[3-9]|3\d)\b/.test(s)) return true;
+
   return false;
 }
 
@@ -112,7 +122,7 @@ async function webThenLLM(userQuery) {
       web.reason === "no-key"
         ? "Web search is not enabled on this server (missing TAVILY_API_KEY)."
         : `Web search failed (${web.reason}).`;
-    return json({ message: msg, mode: "web+llm", model: OPENAI_MODEL, version: "2.2" });
+    return json({ message: msg, mode: "web+llm", model: OPENAI_MODEL, version: "2.3" });
   }
   const context = web.results
     .map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}`)
@@ -130,7 +140,7 @@ async function webThenLLM(userQuery) {
 
 /* ---------------- JS-only time (no network) ---------------- */
 
-// Map common city names to IANA time zones (extend as needed)
+// Common city → IANA timezone (extendable)
 const TZ_MAP = {
   "new york": "America/New_York",
   nyc: "America/New_York",
@@ -139,6 +149,7 @@ const TZ_MAP = {
   berlin: "Europe/Berlin",
   madrid: "Europe/Madrid",
   rome: "Europe/Rome",
+  florence: "Europe/Rome",
   istanbul: "Europe/Istanbul",
   dubai: "Asia/Dubai",
   mumbai: "Asia/Kolkata",
@@ -162,7 +173,6 @@ function findTZ(txt = "") {
   return null;
 }
 
-// Format "now" in a target IANA time zone (no network)
 function formatInZoneNow(tz) {
   const now = new Date();
   return new Intl.DateTimeFormat(undefined, {
@@ -176,7 +186,7 @@ function formatInZoneNow(tz) {
   }).format(now);
 }
 
-// Compute UTC offset (minutes) for a zone at "now" using Intl parts
+// Compute UTC offset in minutes for a zone at "now"
 function offsetMinutesForZoneNow(tz) {
   const now = new Date();
   const parts = new Intl.DateTimeFormat("en-GB", {
@@ -198,11 +208,9 @@ function offsetMinutesForZoneNow(tz) {
   const mi = get("minute");
   const s = get("second");
 
-  // Create a timestamp for that wall time *as if it were UTC*
   const utcAssumingWall = Date.UTC(y, (m || 1) - 1, d || 1, h || 0, mi || 0, s || 0);
-  // Difference between "UTC representing the local wall clock in tz" and the actual UTC now
   const diffMs = utcAssumingWall - now.getTime();
-  return Math.round(diffMs / 60000); // minutes, positive = ahead of UTC
+  return Math.round(diffMs / 60000); // minutes; positive = ahead of UTC
 }
 
 function isTimeQ(q = "") {
@@ -226,21 +234,20 @@ async function answerTime(q) {
         "Tell me the city (e.g., “time in New York now?”) and I’ll give you the exact local time.",
       mode: "time-need-city",
       model: OPENAI_MODEL,
-      version: "2.2",
+      version: "2.3",
     });
 
-  const pretty = formatInZoneNow(tz); // DST-aware, no network
+  const pretty = formatInZoneNow(tz);
   const city = tz.split("/").pop().replace(/_/g, " ");
   return json({
     message: `${city}: ${pretty}`,
     mode: "time-local",
     model: OPENAI_MODEL,
-    version: "2.2",
+    version: "2.3",
   });
 }
 
 async function answerTimeDiff(q) {
-  // Extract up to two zones
   const s = q.toLowerCase();
   const zones = [];
   for (const k of Object.keys(TZ_MAP).sort((a, b) => b.length - a.length)) {
@@ -255,12 +262,12 @@ async function answerTimeDiff(q) {
         "Tell me both places, e.g., “time difference London and New York” or “difference from GMT to New York”.",
       mode: "time-diff-need-two",
       model: OPENAI_MODEL,
-      version: "2.2",
+      version: "2.3",
     });
 
   const aOff = offsetMinutesForZoneNow(aZ);
   const bOff = offsetMinutesForZoneNow(bZ);
-  const diff = bOff - aOff; // B relative to A
+  const diff = bOff - aOff;
   const abs = Math.abs(diff);
   const hours = Math.floor(abs / 60);
   const mins = abs % 60;
@@ -272,21 +279,21 @@ async function answerTimeDiff(q) {
   const B = bZ.split("/").pop().replace(/_/g, " ");
   const msg = diff === 0 ? `${B} is ${dir} ${A}.` : `${B} is ${span} ${dir} ${A}.`;
 
-  return json({ message: msg, mode: "time-diff", model: OPENAI_MODEL, version: "2.2" });
+  return json({ message: msg, mode: "time-diff", model: OPENAI_MODEL, version: "2.3" });
 }
 
 /* ---------------- router ---------------- */
 async function handle(qRaw, history) {
   const q = (qRaw || "").trim();
 
-  // Time first (fast, local, no network → never crashes)
+  // 1) Time (instant, local)
   if (isTimeDiffQ(q)) return await answerTimeDiff(q);
   if (isTimeQ(q)) return await answerTime(q);
 
-  // Live web if needed
+  // 2) Live web when needed
   if (wantsWeb(q)) return await webThenLLM(q);
 
-  // Otherwise: pure passthrough
+  // 3) Otherwise: passthrough LLM
   const msgs = toOpenAIMessages(Array.isArray(history) ? history : [], q);
   return callOpenAI(msgs, "passthrough");
 }
@@ -302,7 +309,7 @@ export default async function handler(req) {
     return await handle(q, []);
   } catch (err) {
     return json(
-      { message: "Chat crashed.", error: String(err), mode: "passthrough", model: OPENAI_MODEL, version: "2.2" },
+      { message: "Chat crashed.", error: String(err), mode: "passthrough", model: OPENAI_MODEL, version: "2.3" },
       500
     );
   }
