@@ -1,198 +1,177 @@
 export const config = { runtime: "edge" };
 
-const STQ_BASE = "https://stooq.com/q/l/?s=";
-const CG_SIMPLE = "https://api.coingecko.com/api/v3/simple/price";
-const CG_SEARCH = "https://api.coingecko.com/api/v3/search";
-const UA = "Mozilla/5.0 (compatible; LifeCre8 Quote/2.0)";
+// ------------------------ Constants ------------------------
+const STQ_BASE = "https://stooq.com/q/l/?s="; // AAPL -> AAPL.US
+const CG_SIMPLE_PRICE = "https://api.coingecko.com/api/v3/simple/price";
+const CG_COIN_LIST = "https://api.coingecko.com/api/v3/coins/list?include_platform=false";
 
-const TIMEOUT_MS = 12000;
+// Cache (in-memory for Edge runtime instance)
+let COIN_LIST_CACHE = { at: 0, map: null }; // { symbolUpper -> [id,id2,...] }
 
-// Optional CoinGecko Pro key (if you have one)
-const CG_KEY = process.env.COINGECKO_API_KEY || process.env.CG_API_KEY || "";
-
-// ---- tiny caches (best-effort on warm edge) ----
-const _cache = {
-  cgIds: new Map(),        // "BTC" -> "bitcoin"
-  stooqOk: new Map(),      // "AAPL" -> "AAPL.US" or "^spx"
-  stooqFail: new Set(),    // "FOO" -> known-bad
-  ts: Date.now()
+// Manual overrides for common/exact symbols that are ambiguous or recently renamed
+const OVERRIDE_SYMBOL_TO_ID = {
+  "BTC": "bitcoin",
+  "ETH": "ethereum",
+  "SOL": "solana",
+  "DOGE": "dogecoin",
+  "USDT": "tether",
+  "USDC": "usd-coin",
+  "BNB": "binancecoin",
+  "XRP": "ripple",
+  "ADA": "cardano",
+  // Polygon rebrand: POL is "polygon-ecosystem-token" (formerly MATIC)
+  "MATIC": "matic-network",
+  "POL": "polygon-ecosystem-token",
 };
 
+// ------------------------ Helpers ------------------------
 function normalizeSymbol(sym) {
-  const s = String(sym || "").trim().toUpperCase();
-  return s.replace(/[_\s]+/g, "-");
+  return String(sym || "").trim().toUpperCase().replace(/[_\s]+/g, "-");
 }
-
-function withTimeout() {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort("timeout"), TIMEOUT_MS);
-  return { signal: ctrl.signal, cleanup: () => clearTimeout(t) };
-}
-
-// ---------------- CoinGecko dynamic resolver ----------------
 function isCryptoSymbol(sym) {
-  if (!sym) return false;
-  if (/-USD$/.test(sym)) return true;
-  if (/^[A-Z0-9]{2,10}$/.test(sym)) return true; // bare coin like BTC
-  if (/^[A-Z0-9]{2,10}[-/][A-Z0-9]{2,10}$/.test(sym)) return true; // pair
-  return false;
+  return /-USD$/i.test(sym) && /^[A-Z0-9]{2,15}-USD$/.test(sym);
+}
+function baseFromPair(sym) {
+  // "ETH-USD" -> "ETH"
+  return sym.replace(/-USD$/i, "");
 }
 
-function baseQuote(sym) {
-  const s = sym.replace("/", "-");
-  const parts = s.split("-");
-  if (parts.length === 1) return { base: s, quote: "USD" };
-  return { base: parts[0], quote: parts[1] || "USD" };
+async function fetchText(url) {
+  const res = await fetch(url, { headers: { "cache-control": "no-cache" } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.text();
 }
 
-async function cgSearchSymbol(base) {
-  const key = base.toUpperCase();
-  if (_cache.cgIds.has(key)) return _cache.cgIds.get(key);
-  const { signal, cleanup } = withTimeout();
-  try {
-    const url = `${CG_SEARCH}?query=${encodeURIComponent(base)}`;
-    const headers = { "user-agent": UA };
-    if (CG_KEY) headers["x-cg-pro-api-key"] = CG_KEY;
-    const res = await fetch(url, { headers, signal });
-    if (!res.ok) throw new Error(`CG search ${res.status}`);
-    const data = await res.json();
-    const coins = Array.isArray(data.coins) ? data.coins : [];
-    const exact = coins.find(c => (c.symbol || "").toUpperCase() === key);
-    const pick = exact || coins[0];
-    const id = pick?.id || null;
-    if (id) _cache.cgIds.set(key, id);
-    return id;
-  } finally {
-    cleanup();
-  }
-}
+// ------------------------ Equities (Stooq) ------------------------
+async function fetchEquity(sym) {
+  const stqSym = `${sym}.US`;
+  const url = `${STQ_BASE}${encodeURIComponent(stqSym)}&f=sd2t2ohlcv&h&e=csv`;
+  const text = await fetchText(url);
 
-async function fetchCrypto(sym) {
-  const { base, quote } = baseQuote(sym);
-  const vs = (quote || "USD").toLowerCase();
-  const id = await cgSearchSymbol(base);
-  if (!id) throw new Error(`Unknown crypto symbol: ${base}`);
-
-  const { signal, cleanup } = withTimeout();
-  try {
-    const url = `${CG_SIMPLE}?ids=${encodeURIComponent(id)}&vs_currencies=${encodeURIComponent(vs)}&include_24hr_change=true`;
-    const headers = { "user-agent": UA };
-    if (CG_KEY) headers["x-cg-pro-api-key"] = CG_KEY;
-    const res = await fetch(url, { headers, signal });
-    if (!res.ok) throw new Error(`CG price ${sym} ${res.status}`);
-    const json = await res.json();
-    const row = json[id];
-    const px = row?.[vs];
-    if (typeof px !== "number") throw new Error(`CG bad body for ${sym}`);
-    const pct = typeof row?.[`${vs}_24h_change`] === "number" ? row[`${vs}_24h_change`] : null;
-    const change = (pct != null) ? (px * (pct / 100)) : null;
-    return {
-      symbol: sym,
-      name: id,
-      price: px,
-      change,
-      changePercent: pct,
-      currency: vs.toUpperCase(),
-      source: "coingecko",
-      asOf: new Date().toISOString(),
-    };
-  } finally {
-    cleanup();
-  }
-}
-
-// ---------------- Stooq multi-exchange probe ----------------
-function mapIndexToStooq(sym) {
-  const m = {
-    "^GSPC": "^spx",      // S&P 500
-    "^DJI":  "^dji",      // Dow 30
-    "^IXIC": "^ndq",      // Nasdaq Composite
-    "^FTSE": "^ukx",      // FTSE 100
-    "^STOXX50E": "^sx5e", // Euro Stoxx 50
-    "^GDAXI": "^dax",     // DAX
-    "^FCHI": "^cac",      // CAC 40
-    "^IBEX": "^ibex",     // IBEX 35
-    "^FTSEMIB": "^ftmib", // FTSE MIB
-    "^N225": "^nikkei",   // Nikkei 225
-    "^HSI": "^hsi"        // Hang Seng
-  };
-  return m[sym] || null;
-}
-
-const STQ_SUFFIXES = ["", ".US", ".UK", ".DE", ".JP", ".PL", ".FR", ".CA", ".BR", ".HK"];
-
-function parseStooqCsv(text) {
   const lines = text.trim().split(/\r?\n/);
-  if (lines.length < 2) throw new Error("stooq empty");
+  if (lines.length < 2) throw new Error(`Stooq ${sym} empty`);
   const row = lines[1].split(",");
   const [Symbol, DateStr, TimeStr, Open, High, Low, Close, Volume] = row;
-  return { Symbol, DateStr, TimeStr, Open, High, Low, Close, Volume };
-}
 
-async function stooqFetchOnce(sym) {
-  const { signal, cleanup } = withTimeout();
-  try {
-    const url = `${STQ_BASE}${encodeURIComponent(sym)}&f=sd2t2ohlcv&h&e=csv`;
-    const res = await fetch(url, { headers: { "cache-control": "no-cache", "user-agent": UA }, signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const text = await res.text();
-    const row = parseStooqCsv(text);
-    const price = parseFloat(row.Close);
-    if (!isFinite(price)) throw new Error("N/D");
-    return row;
-  } finally {
-    cleanup();
-  }
-}
+  const price = parseFloat(Close);
+  if (!isFinite(price)) throw new Error(`Stooq ${sym} bad price`);
 
-async function tryStooqSymbol(base) {
-  if (_cache.stooqOk.has(base)) return _cache.stooqOk.get(base);
-  if (_cache.stooqFail.has(base)) throw new Error("stooq known-bad");
+  const open = parseFloat(Open);
+  const change = isFinite(open) ? price - open : null;
+  const changePercent = isFinite(open) && open !== 0 ? (change / open) * 100 : null;
 
-  const idx = mapIndexToStooq(base);
-  if (idx) {
-    await stooqFetchOnce(idx);
-    _cache.stooqOk.set(base, idx);
-    return idx;
-  }
-
-  for (const suf of STQ_SUFFIXES) {
-    const test = suf ? `${base}${suf}` : base;
-    try {
-      await stooqFetchOnce(test);
-      _cache.stooqOk.set(base, test);
-      return test;
-    } catch {}
-  }
-
-  _cache.stooqFail.add(base);
-  throw new Error("symbol not found on stooq");
-}
-
-async function fetchEquity(sym) {
-  const stqSym = await tryStooqSymbol(sym);
-  const row = await stooqFetchOnce(stqSym);
-  const price = parseFloat(row.Close);
-  const open = parseFloat(row.Open);
-  const change = isFinite(open) ? (price - open) : null;
-  const changePercent = isFinite(open) && open !== 0 ? ((price / open - 1) * 100) : null;
   return {
     symbol: sym,
     name: sym,
     price,
+    open: isFinite(open) ? open : null,
+    high: isFinite(parseFloat(High)) ? parseFloat(High) : null,
+    low: isFinite(parseFloat(Low)) ? parseFloat(Low) : null,
+    volume: isFinite(parseFloat(Volume)) ? parseFloat(Volume) : null,
     change,
     changePercent,
-    open: isFinite(open) ? open : null,
-    high: parseFloat(row.High),
-    low: parseFloat(row.Low),
-    volume: parseFloat(row.Volume),
     currency: "USD",
     source: "stooq",
-    asOf: row.DateStr + (row.TimeStr ? ` ${row.TimeStr}` : ""),
+    asOf: DateStr + (TimeStr ? ` ${TimeStr}` : ""),
   };
 }
 
-// ---------------- HTTP handler ----------------
+// ------------------------ Crypto (CoinGecko) ------------------------
+async function loadCoinListMap() {
+  const now = Date.now();
+  // refresh every 24h
+  if (COIN_LIST_CACHE.map && now - COIN_LIST_CACHE.at < 24 * 60 * 60 * 1000) {
+    return COIN_LIST_CACHE.map;
+  }
+  const res = await fetch(CG_COIN_LIST, { headers: { "cache-control": "no-cache" } });
+  if (!res.ok) throw new Error(`CG list ${res.status}`);
+  const list = await res.json();
+  // Build a map: SYMBOL_UPPER -> [id,id2,...]
+  const map = new Map();
+  for (const c of list || []) {
+    const sym = (c?.symbol || "").toUpperCase();
+    if (!sym || !c?.id) continue;
+    if (!map.has(sym)) map.set(sym, []);
+    map.get(sym).push(c.id);
+  }
+  COIN_LIST_CACHE = { at: now, map };
+  return map;
+}
+
+function pickBestId(symbolUpper, candidates) {
+  // If we have a manual override, always prefer it.
+  const override = OVERRIDE_SYMBOL_TO_ID[symbolUpper];
+  if (override && candidates.includes(override)) return override;
+  if (override && candidates.length) return override;
+
+  // Otherwise, a simple heuristic: prefer the shortest id (typically canonical).
+  return candidates.sort((a, b) => a.length - b.length)[0] || null;
+}
+
+async function resolveCryptoIds(symbols /* like ["ETH-USD","POL-USD"] */) {
+  const map = await loadCoinListMap();
+  const out = new Map(); // "ETH-USD" -> "ethereum"
+  for (const pair of symbols) {
+    const base = baseFromPair(pair);     // "ETH"
+    const upper = base.toUpperCase();    // "ETH"
+
+    // Manual override first
+    if (OVERRIDE_SYMBOL_TO_ID[upper]) {
+      out.set(pair, OVERRIDE_SYMBOL_TO_ID[upper]);
+      continue;
+    }
+    // From list
+    const cands = map.get(upper) || [];
+    const picked = pickBestId(upper, cands);
+    if (picked) out.set(pair, picked);
+  }
+  return out; // Map(pair -> id)
+}
+
+async function fetchCryptoBatch(pairs /* ["ETH-USD","POL-USD"] */) {
+  // Resolve to CoinGecko ids
+  const idMap = await resolveCryptoIds(pairs);
+  const idList = [...new Set([...idMap.values()])];
+  if (!idList.length) {
+    // nothing resolved
+    return pairs.map((p) => ({ symbol: p, error: "No CoinGecko id found" }));
+  }
+
+  const url =
+    `${CG_SIMPLE_PRICE}?ids=${encodeURIComponent(idList.join(","))}` +
+    `&vs_currencies=usd&include_24hr_change=true`;
+  const res = await fetch(url, { headers: { "cache-control": "no-cache" } });
+  if (!res.ok) {
+    const errTxt = await res.text().catch(() => "");
+    return pairs.map((p) => ({ symbol: p, error: `CG ${res.status} ${errTxt}` }));
+  }
+  const json = await res.json();
+
+  // Build results per requested pair
+  const items = pairs.map((pair) => {
+    const id = idMap.get(pair);
+    const row = id ? json[id] : null;
+    if (!row || typeof row.usd !== "number") {
+      return { symbol: pair, error: `No data for ${pair}` };
+    }
+    const pct = typeof row.usd_24h_change === "number" ? row.usd_24h_change : null;
+    return {
+      symbol: pair,
+      name: id,
+      price: row.usd,
+      // For UI: put percent into both changePercent and (if delta missing) change
+      changePercent: pct,
+      changePct24h: pct,
+      currency: "USD",
+      source: "coingecko",
+      asOf: new Date().toISOString(),
+    };
+  });
+
+  return items;
+}
+
+// ------------------------ Handler ------------------------
 export default async function handler(req) {
   try {
     const { searchParams } = new URL(req.url);
@@ -200,32 +179,49 @@ export default async function handler(req) {
     const syms = raw.split(",").map(normalizeSymbol).filter(Boolean);
 
     if (!syms.length) {
-      return new Response(JSON.stringify({ quotes: [], note: "Pass ?symbols=AAPL,MSFT,BTC-USD or BTC" }), {
-        headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+      return new Response(JSON.stringify({ items: [], note: "Pass ?symbols=AAPL,MSFT,BTC-USD" }), {
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+        },
         status: 200,
       });
     }
 
-    const tasks = syms.map(async (s) => {
-      try {
-        if (isCryptoSymbol(s)) return await fetchCrypto(s);
-        return await fetchEquity(s);
-      } catch (err) {
-        return { symbol: s, error: String(err && err.message ? err.message : err) };
-      }
+    const equities = syms.filter((s) => !isCryptoSymbol(s));
+    const cryptoPairs = syms.filter((s) => isCryptoSymbol(s));
+
+    // Run in parallel: equities (per-symbol) + crypto (batched)
+    const eqTasks = equities.map(async (s) => {
+      try { return await fetchEquity(s); }
+      catch (err) { return { symbol: s, error: String(err && err.message ? err.message : err) }; }
     });
 
-    const quotes = await Promise.all(tasks);
+    const cryptoTask = (async () => {
+      if (!cryptoPairs.length) return [];
+      try { return await fetchCryptoBatch(cryptoPairs); }
+      catch (err) {
+        return cryptoPairs.map((s) => ({ symbol: s, error: String(err && err.message ? err.message : err) }));
+      }
+    })();
 
-    return new Response(JSON.stringify({ quotes }), {
+    const [eqItems, crItems] = await Promise.all([
+      Promise.all(eqTasks),
+      cryptoTask,
+    ]);
+
+    const items = [...eqItems, ...crItems];
+
+    return new Response(JSON.stringify({ items }), {
       headers: {
         "content-type": "application/json; charset=utf-8",
+        // small CDN cache to smooth bursts
         "cache-control": "s-maxage=30, stale-while-revalidate=60",
       },
       status: 200,
     });
   } catch (err) {
-    return new Response(JSON.stringify({ quotes: [], error: String(err) }), {
+    return new Response(JSON.stringify({ error: String(err) }), {
       headers: { "content-type": "application/json; charset=utf-8" },
       status: 500,
     });
