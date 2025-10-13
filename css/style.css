@@ -1,10 +1,8 @@
-/* LifeCre8 — style.css v1.7.5 (merge on v1.7.4)
-   - Keep existing layout/variables
-   - Links use theme colors (no default blue)
-   - RSS list styling (thumbnails, spacing, clamped titles)
-   - Guard: grid min column sizing so tiles don’t slip under AI panel
-   - +A11y: :focus-visible outlines for interactive elements
-   - +Safety: images max-width:100% to avoid overflow
+/* LifeCre8 — style.css v1.8.0
+   Changes:
+   - Compact = old comfortable: 2-col grid, centered @1200px max width.
+   - Comfortable = full-width single column that flows to AI edge.
+   - Card depth unified: same height in both modes (current comfortable depth).
 */
 
 /* ===== THEME VARS ===== */
@@ -13,7 +11,9 @@
   --text:#fff8ea; --muted:#f2d4a4;
   --primary:#f59e0b; --primary-dark:#b45309;
   --bubble-user:#334155; --bubble-ai:#3b3f53;
-  --right-width:320px; --card-height:420px;
+  --right-width:320px; 
+  /* Unify depth across modes: keep current comfortable height */
+  --card-height:420px;
 }
 body.theme-ice{
   --bg:#eef6ff; --panel:#ffffff; --card:#f3f9ff; --border:#c7ddf6;
@@ -21,7 +21,10 @@ body.theme-ice{
   --primary:#0284c7; --primary-dark:#0369a1;
   --bubble-user:#e4f2ff; --bubble-ai:#edf6ff;
 }
-body.density-compact{ --card-height:340px; }
+
+/* NOTE: previously compact lowered height; now compact shares same depth.
+   Keep the class for future tuning but do not change height. */
+body.density-compact{ /* --card-height:420px; */ }
 
 /* ===== RESETS ===== */
 *{box-sizing:border-box;margin:0;padding:0}
@@ -30,15 +33,10 @@ body{
   font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;
   background:var(--bg);color:var(--text);overflow:hidden
 }
-img{max-width:100%;height:auto}
 
 /* Enforce link colors so they never fall back to browser blue */
 a, a:visited{ color: var(--text); text-decoration:none; }
 a:hover{ color: var(--primary); text-decoration:underline; }
-a:focus-visible, button:focus-visible, .sb-icon:focus-visible, .btn:focus-visible, .input:focus-visible{
-  outline:2px solid var(--primary); outline-offset:2px;
-  box-shadow:0 0 0 2px color-mix(in oklab, var(--primary) 30%, transparent);
-}
 
 /* ===== LAYOUT ===== */
 .app{display:grid;grid-template-columns:64px 1fr var(--right-width);min-height:100vh}
@@ -69,13 +67,33 @@ body.density-compact .input{padding:8px 10px}
 .btn.sm{padding:6px 10px;border-radius:8px;font-size:12px;min-height:30px}
 body.density-compact .btn.sm{padding:4px 8px;min-height:26px}
 
-/* Grid: guard min column sizes so nothing slips behind the AI panel */
+/* ===== GRID MODES ===== */
+
+/* Comfortable (DEFAULT): FULL-WIDTH single column that flows to AI edge.
+   We remove the previous 1200px max constraint and center margin. */
 .grid{
-  max-width:1200px;margin:0 auto;padding:16px;display:grid;
-  grid-template-columns:repeat(2,minmax(360px,1fr));
-  gap:16px
+  margin:0;                 /* stretch with the main column */
+  padding:16px;
+  display:grid;
+  grid-template-columns:1fr; /* full-width tiles */
+  gap:16px;
+  max-width:none;           /* no hard cap; respects AI panel column */
 }
-@media(max-width:980px){.grid{grid-template-columns:1fr}}
+
+/* Compact: use the old comfortable layout — 2 columns, centered, 1200px cap */
+body.density-compact .grid{
+  max-width:1200px;
+  margin:0 auto;
+  padding:16px;
+  display:grid;
+  grid-template-columns:repeat(2,minmax(360px,1fr));
+  gap:16px;
+}
+
+/* Small screens: always single column */
+@media(max-width:980px){
+  body.density-compact .grid{grid-template-columns:1fr;max-width:none;margin:0}
+}
 
 /* ===== CARDS ===== */
 .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:14px;box-shadow:0 2px 10px rgba(0,0,0,.15);height:var(--card-height);display:flex;flex-direction:column}
@@ -125,7 +143,7 @@ body.density-compact .btn.sm{padding:4px 8px;min-height:26px}
 
 /* ===== STOCKS ===== */
 .ticker{display:grid;gap:8px}
-.trow{display:grid;grid-template-columns:80px 1fr 80px;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:rgba(0,0,0,.03)}
+.trow{display:grid;grid-template-columns:80px 1fr 120px;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:rgba(0,0,0,.03)}
 .sym{font-weight:700;letter-spacing:.5px}
 .price,.chg{text-align:right;font-variant-numeric:tabular-nums}
 .up .chg{color:#22c55e}.down .chg{color:#ef4444}
@@ -153,7 +171,7 @@ body.density-compact .btn.sm{padding:4px 8px;min-height:26px}
 /* ===== FOOTER ===== */
 .footer{padding:16px;text-align:center;color:var(--muted)}
 
-/* ===== MODAL (safety) ===== */
+/* ===== MODAL ===== */
 #modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.55); z-index: 2000; }
 #modal.show { display: flex; }
 #modal .modal-card{
@@ -163,7 +181,7 @@ body.density-compact .btn.sm{padding:4px 8px;min-height:26px}
   border-radius:14px; box-shadow:0 20px 60px rgba(0,0,0,.6); padding:16px;
 }
 
-/* ===== NEW: RSS ITEM STYLES ===== */
+/* ===== RSS ITEM STYLES ===== */
 .rss .rss-item{display:flex;gap:10px;align-items:flex-start;padding:8px 6px;border-bottom:1px dashed var(--border)}
 .rss .rss-item:last-child{border-bottom:0}
 .rss .thumb{width:56px;height:56px;flex:0 0 56px;border-radius:8px;object-fit:cover;border:1px solid var(--border);background:#0a1522}
