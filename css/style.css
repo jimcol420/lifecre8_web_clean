@@ -1,8 +1,7 @@
-/* LifeCre8 — style.css v1.8.0
-   Changes:
-   - Compact = old comfortable: 2-col grid, centered @1200px max width.
-   - Comfortable = full-width single column that flows to AI edge.
-   - Card depth unified: same height in both modes (current comfortable depth).
+/* LifeCre8 — style.css v1.8.1
+   - Comfortable = full-width single column (to AI edge)
+   - Compact = old comfortable (2-col centered)
+   - New: tile header now stacks title (top) and centered buttons (below)
 */
 
 /* ===== THEME VARS ===== */
@@ -11,9 +10,8 @@
   --text:#fff8ea; --muted:#f2d4a4;
   --primary:#f59e0b; --primary-dark:#b45309;
   --bubble-user:#334155; --bubble-ai:#3b3f53;
-  --right-width:320px; 
-  /* Unify depth across modes: keep current comfortable height */
-  --card-height:420px;
+  --right-width:320px;
+  --card-height:420px; /* unified depth */
 }
 body.theme-ice{
   --bg:#eef6ff; --panel:#ffffff; --card:#f3f9ff; --border:#c7ddf6;
@@ -21,10 +19,7 @@ body.theme-ice{
   --primary:#0284c7; --primary-dark:#0369a1;
   --bubble-user:#e4f2ff; --bubble-ai:#edf6ff;
 }
-
-/* NOTE: previously compact lowered height; now compact shares same depth.
-   Keep the class for future tuning but do not change height. */
-body.density-compact{ /* --card-height:420px; */ }
+body.density-compact{ /* keep same depth intentionally */ }
 
 /* ===== RESETS ===== */
 *{box-sizing:border-box;margin:0;padding:0}
@@ -33,8 +28,6 @@ body{
   font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;
   background:var(--bg);color:var(--text);overflow:hidden
 }
-
-/* Enforce link colors so they never fall back to browser blue */
 a, a:visited{ color: var(--text); text-decoration:none; }
 a:hover{ color: var(--primary); text-decoration:underline; }
 
@@ -68,19 +61,14 @@ body.density-compact .input{padding:8px 10px}
 body.density-compact .btn.sm{padding:4px 8px;min-height:26px}
 
 /* ===== GRID MODES ===== */
-
-/* Comfortable (DEFAULT): FULL-WIDTH single column that flows to AI edge.
-   We remove the previous 1200px max constraint and center margin. */
 .grid{
-  margin:0;                 /* stretch with the main column */
+  margin:0;
   padding:16px;
   display:grid;
-  grid-template-columns:1fr; /* full-width tiles */
+  grid-template-columns:1fr; /* full-width tiles to AI edge */
   gap:16px;
-  max-width:none;           /* no hard cap; respects AI panel column */
+  max-width:none;
 }
-
-/* Compact: use the old comfortable layout — 2 columns, centered, 1200px cap */
 body.density-compact .grid{
   max-width:1200px;
   margin:0 auto;
@@ -89,19 +77,36 @@ body.density-compact .grid{
   grid-template-columns:repeat(2,minmax(360px,1fr));
   gap:16px;
 }
-
-/* Small screens: always single column */
 @media(max-width:980px){
   body.density-compact .grid{grid-template-columns:1fr;max-width:none;margin:0}
 }
 
 /* ===== CARDS ===== */
 .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:14px;box-shadow:0 2px 10px rgba(0,0,0,.15);height:var(--card-height);display:flex;flex-direction:column}
-.card h3{margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px}
-.card h3 .title{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.card h3 .actions{flex:0 0 auto;display:flex;gap:6px;white-space:nowrap}
 .card .content{flex:1;overflow:auto}
 
+/* Header (NEW: stacked title + centered buttons) */
+.card h3{
+  margin-bottom:8px;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+.card h3 .title{
+  font-weight:800;
+  line-height:1.2;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.card h3 .actions{
+  display:flex;
+  justify-content:center;   /* centered buttons */
+  gap:6px;
+  flex-wrap:wrap;
+}
+
+/* Generic */
 .row{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .muted{color:var(--muted);font-size:12px}
 

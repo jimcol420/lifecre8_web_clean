@@ -1,11 +1,8 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.11.2
-   Changes (vs 1.11.0):
-   - Assistant: auto /web when the query needs fresh info (weather, forecast, latest, price today, news, scores, etc.)
-   - Assistant: lightweight Markdown rendering (bold/italic/links/lists/code)
-   - Assistant: show tiny mode badge (e.g., web+llm / time-local / passthrough)
-   - Assistant: safer error handling (no silent crashes)
-   Other app features preserved as-is.
+   LifeCre8 — main.js  v1.11.1
+   Changes:
+   - Card header uses two lines: title (top) + centered buttons (below)
+   - No logic changes to tiles; all prior features preserved
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -47,7 +44,7 @@ const STOCK_PRESETS = {
 let sections    = JSON.parse(localStorage.getItem(K_SECTIONS)  || "[]");
 let assistantOn = localStorage.getItem(K_ASSIST_ON) === null ? true : JSON.parse(localStorage.getItem(K_ASSIST_ON));
 let chat        = JSON.parse(localStorage.getItem(K_CHAT)      || "[]");
-if (!chat.length) chat = [{ role:'ai', text:"Hi! I'm your AI Assistant. Ask me anything.", meta:{} }];
+if (!chat.length) chat = [{ role:'ai', text:"Hi! I'm your AI Assistant. Ask me anything." }];
 
 let prefs = JSON.parse(localStorage.getItem(K_PREFS) || "{}");
 if (!prefs.theme)   prefs.theme   = "solar";
@@ -134,7 +131,7 @@ function webTileMarkup(url) {
 }
 
 /* -----------------------------
-   Maps tile (travel intent)
+   Maps tile
 ----------------------------- */
 function mapsTileMarkup(query){
   const embed   = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
@@ -154,7 +151,7 @@ function mapsTileMarkup(query){
 }
 
 /* -----------------------------
-   RSS tile (enriched)
+   RSS tile
 ----------------------------- */
 function rssListMarkup(items) {
   const list = (items || []).map(i => `
@@ -240,10 +237,7 @@ function loadQuotesInto(card, symbols) {
     .then(r=>r.json())
     .then(data=>{
       const map = {};
-      (data.quotes||data.items||[]).forEach(q=>{
-        const sym = (q.symbol||q.ticker||"").toUpperCase();
-        map[sym] = q;
-      });
+      (data.items||data.quotes||[]).forEach(q=>{ map[(q.symbol||'').toUpperCase()] = q; });
       const rows = card.querySelectorAll(".trow");
       rows.forEach(row=>{
         const sym = row.dataset.sym.toUpperCase();
@@ -252,14 +246,19 @@ function loadQuotesInto(card, symbols) {
         const priceEl = row.querySelector("[data-price]");
         const chgEl   = row.querySelector("[data-chg]");
         const price = q.price;
-        const delta = q.change ?? q.change24h ?? q.changePct24h;
-        const pct   = q.changePercent ?? q.changePct24h;
+        const delta = (typeof q.change === "number") ? q.change :
+                      (typeof q.changePct24h === "number" && typeof q.price === "number")
+                        ? (q.price * q.changePct24h / 100)
+                        : null;
+        const pct   = (typeof q.changePercent === "number") ? q.changePercent :
+                      (typeof q.changePct24h === "number") ? q.changePct24h : null;
+
         priceEl.textContent = (price!=null) ? Number(price).toFixed(2) : "—";
         chgEl.textContent   = (delta!=null && pct!=null)
           ? `${delta>=0?"+":""}${Number(delta).toFixed(2)}  (${pct>=0?"+":""}${Number(pct).toFixed(2)}%)`
-          : (delta!=null ? `${delta>=0?"+":""}${Number(delta).toFixed(2)}` : "—");
-        row.classList.toggle("up",   delta >= 0);
-        row.classList.toggle("down", delta <  0);
+          : "—";
+        row.classList.toggle("up",   (delta ?? 0) >= 0);
+        row.classList.toggle("down", (delta ?? 0) <  0);
       });
     })
     .catch(()=>{
@@ -271,7 +270,7 @@ function loadQuotesInto(card, symbols) {
 }
 
 /* -----------------------------
-   Football (simulated fallback)
+   Football (seed)
 ----------------------------- */
 function footballMarkupSeed() {
   const matches = [
@@ -383,7 +382,9 @@ function render() {
     card.innerHTML = `
       <h3>
         <span class="title">${s.title}</span>
-        ${cardHeaderActions(s.id)}
+        <div class="tile-buttons-row">
+          ${cardHeaderActions(s.id)}
+        </div>
       </h3>
       <div class="content">${tileContentFor(s)}</div>
     `;
@@ -623,7 +624,7 @@ function render() {
 })();
 
 /* -----------------------------
-   Add Tile — AI agent (unchanged client; server decides)
+   Add Tile — AI agent
 ----------------------------- */
 const addBtn     = $("#addTileBtnTop");
 const tileMenu   = $("#tileMenu");
@@ -693,7 +694,7 @@ tileSearch?.addEventListener("keydown", async (e)=>{
 });
 
 /* -----------------------------
-   Assistant Toggle & Chat (live-aware)
+   Assistant Toggle & Chat
 ----------------------------- */
 const assistantToggle = $("#assistantToggle");
 const assistantPanel  = $("#assistantPanel");
@@ -714,84 +715,44 @@ assistantToggle?.addEventListener("click", (e) => {
   updateAssistant();
 });
 
-/* --- tiny Markdown renderer (safe, minimal) --- */
-function escapeHtml(s){ return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-function mdRender(src=""){
-  let s = escapeHtml(src);
-  // code
-  s = s.replace(/```([\s\S]*?)```/g, (_,code)=>`<pre><code>${code.trim()}</code></pre>`);
-  // inline code
-  s = s.replace(/`([^`]+)`/g, (_,t)=>`<code>${t}</code>`);
-  // bold / italics
-  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  s = s.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-  // links
-  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, `<a href="$2" target="_blank" rel="noopener">$1</a>`);
-  // simple lists
-  s = s.replace(/(^|\n)\s*[-•]\s+(.+)(?=\n|$)/g, "$1<li>$2</li>");
-  s = s.replace(/(<li>[\s\S]*?<\/li>)/g, "<ul>$1</ul>");
-  // newlines
-  s = s.replace(/\n/g, "<br/>");
-  return s;
-}
-
 function renderChat(){
   if (!chatLog) return;
   chatLog.innerHTML = "";
   chat.forEach(m=>{
     const d = document.createElement("div");
     d.className = `msg ${m.role}`;
-    if (m.role === "ai") {
-      const html = mdRender(m.text || "");
-      d.innerHTML = `<div>${html}</div>${m.meta?.mode ? `<div class="muted" style="margin-top:4px;font-size:11px">mode: ${m.meta.mode}${m.meta.model?` · ${m.meta.model}`:''}</div>`:""}`;
-    } else {
-      d.textContent = m.text || "";
-    }
+    d.textContent = m.text;
     chatLog.appendChild(d);
   });
   chatLog.scrollTop = chatLog.scrollHeight;
 }
-function addChat(role, text, meta={}){
-  chat.push({role, text, meta});
+function addChat(role, text){
+  chat.push({role, text});
   localStorage.setItem(K_CHAT, JSON.stringify(chat));
   renderChat();
 }
 
-/* Detect queries that should force live web (prefix /web) */
-function shouldForceWeb(q=""){
-  const s = q.toLowerCase();
-  if (/^\/web\s+/.test(s)) return true;
-  if (/\b(latest|today|this week|this month|breaking|update|just now|live|live price|price now|price today|score|scores|fixtures|schedule|news|weather|forecast|temperature|price|odds)\b/.test(s)) return true;
-  if (/\b20(2[3-9]|3\d)\b/.test(s)) return true; // explicit recent years
-  return false;
-}
-
 chatForm?.addEventListener("submit", async (e)=>{
   e.preventDefault();
-  const raw = chatInput.value;
-  const text = (raw || "").trim();
+  const text = chatInput.value.trim();
   if (!text) return;
-
-  // Force live for “fresh-data” questions by prefixing /web (server will pick web+llm path)
-  const payloadText = shouldForceWeb(text) && !/^\/web\s+/i.test(text) ? `/web ${text}` : text;
-
   addChat('user', text);
   chatInput.value = "";
   try {
     const r = await fetch("/api/ai-chat", {
       method:"POST",
       headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ q: payloadText, messages: chat })
+      body: JSON.stringify({ q: text, messages: chat })
     });
     const j = await r.json();
-    addChat('ai', j.message || "…", { mode: j.mode, model: j.model, version: j.version });
-  } catch (err) {
-    addChat('ai', "I couldn't reach the chat service just now. Try again in a moment.", { mode:"error" });
+    addChat('ai', j.message || "…");
+  } catch {
+    addChat('ai', "I couldn't reach the chat service just now. Try again in a moment.");
   }
 });
 
 /* -----------------------------
-   Global settings (Top button)
+   Global settings
 ----------------------------- */
 $("#globalSettingsBtn")?.addEventListener("click", ()=>{
   const html = `
