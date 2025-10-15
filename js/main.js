@@ -1,8 +1,8 @@
 /* ============================================================
-   LifeCre8 — main.js  v1.11.1
-   Changes:
-   - Card header uses two lines: title (top) + centered buttons (below)
-   - No logic changes to tiles; all prior features preserved
+   LifeCre8 — main.js  v1.11.4
+   What's new in 1.11.4:
+   - Football tile now pulls LIVE fixtures via /api/football (polls every 60s)
+   - No changes to your other tile logic, chat, or UI wiring
 ============================================================ */
 
 /* ===== Keys & Version ===== */
@@ -131,7 +131,7 @@ function webTileMarkup(url) {
 }
 
 /* -----------------------------
-   Maps tile
+   Maps tile (travel intent)
 ----------------------------- */
 function mapsTileMarkup(query){
   const embed   = `https://www.google.com/maps?q=${encodeURIComponent(query)}&output=embed`;
@@ -151,7 +151,7 @@ function mapsTileMarkup(query){
 }
 
 /* -----------------------------
-   RSS tile
+   RSS tile (enriched)
 ----------------------------- */
 function rssListMarkup(items) {
   const list = (items || []).map(i => `
@@ -236,8 +236,10 @@ function loadQuotesInto(card, symbols) {
   fetch(url)
     .then(r=>r.json())
     .then(data=>{
+      // Support both {quotes:[...]} and {items:[...]} response shapes
+      const arr = data.quotes || data.items || [];
       const map = {};
-      (data.items||data.quotes||[]).forEach(q=>{ map[(q.symbol||'').toUpperCase()] = q; });
+      arr.forEach(q=>{ map[(q.symbol||"").toUpperCase()] = q; });
       const rows = card.querySelectorAll(".trow");
       rows.forEach(row=>{
         const sym = row.dataset.sym.toUpperCase();
@@ -245,20 +247,22 @@ function loadQuotesInto(card, symbols) {
         if (!q) return;
         const priceEl = row.querySelector("[data-price]");
         const chgEl   = row.querySelector("[data-chg]");
-        const price = q.price;
-        const delta = (typeof q.change === "number") ? q.change :
-                      (typeof q.changePct24h === "number" && typeof q.price === "number")
-                        ? (q.price * q.changePct24h / 100)
-                        : null;
-        const pct   = (typeof q.changePercent === "number") ? q.changePercent :
-                      (typeof q.changePct24h === "number") ? q.changePct24h : null;
 
-        priceEl.textContent = (price!=null) ? Number(price).toFixed(2) : "—";
-        chgEl.textContent   = (delta!=null && pct!=null)
-          ? `${delta>=0?"+":""}${Number(delta).toFixed(2)}  (${pct>=0?"+":""}${Number(pct).toFixed(2)}%)`
-          : "—";
-        row.classList.toggle("up",   (delta ?? 0) >= 0);
-        row.classList.toggle("down", (delta ?? 0) <  0);
+        const price = q.price;
+        const delta = q.change ?? q.change24h ?? q.delta;
+        const pct   = q.changePercent ?? q.changePct24h ?? q.pct;
+
+        priceEl.textContent = (price!=null && isFinite(price)) ? Number(price).toFixed(2) : "—";
+        if (delta!=null && pct!=null) {
+          const d = Number(delta);
+          const p = Number(pct);
+          chgEl.textContent = `${d>=0?"+":""}${d.toFixed(2)}  (${p>=0?"+":""}${p.toFixed(2)}%)`;
+          row.classList.toggle("up",   d >= 0);
+          row.classList.toggle("down", d <  0);
+        } else {
+          chgEl.textContent = "—";
+          row.classList.remove("up","down");
+        }
       });
     })
     .catch(()=>{
@@ -270,23 +274,44 @@ function loadQuotesInto(card, symbols) {
 }
 
 /* -----------------------------
-   Football (seed)
+   FOOTBALL (LIVE via /api/football)
 ----------------------------- */
-function footballMarkupSeed() {
-  const matches = [
-    { home:"Arsenal", away:"Chelsea", hs:0, as:0, min:0, status:"KO 20:00", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/gb-eng.png", awayBadge:"https://flagcdn.com/w20/gb-eng.png" },
-    { home:"Barcelona", away:"Real Madrid", hs:0, as:0, min:0, status:"KO 20:15", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/es.png", awayBadge:"https://flagcdn.com/w20/es.png" },
-    { home:"Bayern", away:"Dortmund", hs:0, as:0, min:0, status:"KO 20:30", started:false, finished:false, homeBadge:"https://flagcdn.com/w20/de.png", awayBadge:"https://flagcdn.com/w20/de.png" },
-  ];
-  const rows = matches.map((m,i)=>`
-    <div class="match" data-idx="${i}">
-      <div class="team home"><img alt="" src="${m.homeBadge}"/><span>${m.home}</span></div>
-      <div class="score" data-score>${m.hs}–${m.as}</div>
-      <div class="team away"><img alt="" src="${m.awayBadge}"/><span>${m.away}</span></div>
-      <div class="status" data-status>${m.status}</div>
-    </div>
-  `).join("");
-  return `<div class="scores" data-matches="${encodeURIComponent(JSON.stringify(matches))}">${rows}</div>`;
+function footballListMarkup(matches) {
+  if (!matches || !matches.length) {
+    return `<div class="muted">No major fixtures found today.</div>`;
+  }
+  const rows = matches.map(m => {
+    const k = m.statusText || "";
+    const live = /IN|HALFTIME|LIVE/i.test(k);
+    const done = /FT|FINAL/i.test(k);
+    const statusHtml = live
+      ? `<span style="color:#f59e0b">${k}</span>`
+      : done
+      ? `<span style="color:#94a3b8">${k}</span>`
+      : new Date(m.kickoff).toLocaleTimeString([], { hour:"2-digit", minute:"2-digit" });
+    const scoreHtml = (live || done)
+      ? `${m.home.score}–${m.away.score}`
+      : "–";
+    return `
+      <div class="match">
+        <div class="team home"><span>${m.home.name}</span></div>
+        <div class="score">${scoreHtml}</div>
+        <div class="team away"><span>${m.away.name}</span></div>
+        <div class="status">${statusHtml}</div>
+      </div>
+    `;
+  }).join("");
+  return `<div class="scores">${rows}</div>`;
+}
+async function loadFootballInto(card) {
+  const content = card.querySelector(".content");
+  try {
+    const r = await fetch("/api/football", { cache: "no-store" });
+    const j = await r.json();
+    content.innerHTML = footballListMarkup(j.matches || []);
+  } catch {
+    content.innerHTML = `<div class="muted">Couldn't load live fixtures right now.</div>`;
+  }
 }
 
 /* -----------------------------
@@ -308,7 +333,7 @@ function defaultSections() {
     { id: uid(), type:"web",      title:"BBC News",    meta:{url:"https://www.bbc.com"}, content: webTileMarkup("https://www.bbc.com") },
     { id: uid(), type:"youtube",  title:"YouTube",     meta:{ playlist:[...YT_DEFAULTS], current:"M7lc1UVf-VE" }, content: ytPlaylistMarkup(YT_DEFAULTS, "M7lc1UVf-VE") },
     { id: uid(), type:"stocks",   title:"Markets",     meta:{ symbols:["AAPL","MSFT","BTC-USD"] }, content: tickerMarkup(["AAPL","MSFT","BTC-USD"]) },
-    { id: uid(), type:"football", title:"Football",    meta:{}, content: footballMarkupSeed() },
+    { id: uid(), type:"football", title:"Football",    meta:{}, content: `<div class="muted">Loading fixtures…</div>` },
     { id: uid(), type:"gallery",  title:"Gallery",     meta:{ urls: gallerySeed() }, content: galleryMarkup(gallerySeed()) }
   ];
 }
@@ -382,16 +407,14 @@ function render() {
     card.innerHTML = `
       <h3>
         <span class="title">${s.title}</span>
-        <div class="tile-buttons-row">
-          ${cardHeaderActions(s.id)}
-        </div>
+        ${cardHeaderActions(s.id)}
       </h3>
       <div class="content">${tileContentFor(s)}</div>
     `;
     grid.appendChild(card);
   });
 
-  // live: RSS + Quotes
+  // live: RSS + Quotes + Football
   $$('.card[data-type="rss"]').forEach(card=>{
     const id = card.dataset.id;
     const s = sections.find(x=>x.id===id);
@@ -407,6 +430,11 @@ function render() {
     const refresh = () => loadQuotesInto(card, syms);
     refresh();
     liveIntervals[id+"_quotes"] = setInterval(refresh, 30*1000);
+  });
+  $$('.card[data-type="football"]').forEach(card=>{
+    const refresh = () => loadFootballInto(card);
+    refresh();
+    liveIntervals[card.dataset.id+"_football"] = setInterval(refresh, 60*1000);
   });
 }
 
@@ -694,7 +722,7 @@ tileSearch?.addEventListener("keydown", async (e)=>{
 });
 
 /* -----------------------------
-   Assistant Toggle & Chat
+   Assistant Toggle & Chat (standalone)
 ----------------------------- */
 const assistantToggle = $("#assistantToggle");
 const assistantPanel  = $("#assistantPanel");
@@ -752,7 +780,7 @@ chatForm?.addEventListener("submit", async (e)=>{
 });
 
 /* -----------------------------
-   Global settings
+   Global settings (Top button)
 ----------------------------- */
 $("#globalSettingsBtn")?.addEventListener("click", ()=>{
   const html = `
