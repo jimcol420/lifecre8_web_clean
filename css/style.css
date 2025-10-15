@@ -1,7 +1,7 @@
-/* LifeCre8 — style.css v1.8.1
+/* LifeCre8 — style.css v1.8.2
    - Comfortable = full-width single column (to AI edge)
    - Compact = old comfortable (2-col centered)
-   - New: tile header now stacks title (top) and centered buttons (below)
+   - Tile header: title on top, buttons below right-aligned
 */
 
 /* ===== THEME VARS ===== */
@@ -11,7 +11,7 @@
   --primary:#f59e0b; --primary-dark:#b45309;
   --bubble-user:#334155; --bubble-ai:#3b3f53;
   --right-width:320px;
-  --card-height:420px; /* unified depth */
+  --card-height:420px;
 }
 body.theme-ice{
   --bg:#eef6ff; --panel:#ffffff; --card:#f3f9ff; --border:#c7ddf6;
@@ -19,7 +19,7 @@ body.theme-ice{
   --primary:#0284c7; --primary-dark:#0369a1;
   --bubble-user:#e4f2ff; --bubble-ai:#edf6ff;
 }
-body.density-compact{ /* keep same depth intentionally */ }
+body.density-compact{}
 
 /* ===== RESETS ===== */
 *{box-sizing:border-box;margin:0;padding:0}
@@ -28,8 +28,8 @@ body{
   font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;
   background:var(--bg);color:var(--text);overflow:hidden
 }
-a, a:visited{ color: var(--text); text-decoration:none; }
-a:hover{ color: var(--primary); text-decoration:underline; }
+a,a:visited{color:var(--text);text-decoration:none}
+a:hover{color:var(--primary);text-decoration:underline}
 
 /* ===== LAYOUT ===== */
 .app{display:grid;grid-template-columns:64px 1fr var(--right-width);min-height:100vh}
@@ -65,7 +65,7 @@ body.density-compact .btn.sm{padding:4px 8px;min-height:26px}
   margin:0;
   padding:16px;
   display:grid;
-  grid-template-columns:1fr; /* full-width tiles to AI edge */
+  grid-template-columns:1fr;
   gap:16px;
   max-width:none;
 }
@@ -85,12 +85,12 @@ body.density-compact .grid{
 .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:14px;box-shadow:0 2px 10px rgba(0,0,0,.15);height:var(--card-height);display:flex;flex-direction:column}
 .card .content{flex:1;overflow:auto}
 
-/* Header (NEW: stacked title + centered buttons) */
+/* ===== TILE HEADER (v1.8.2) ===== */
 .card h3{
   margin-bottom:8px;
   display:flex;
   flex-direction:column;
-  gap:6px;
+  gap:4px;
 }
 .card h3 .title{
   font-weight:800;
@@ -101,16 +101,16 @@ body.density-compact .grid{
 }
 .card h3 .actions{
   display:flex;
-  justify-content:center;   /* centered buttons */
+  justify-content:flex-end; /* right-aligned buttons */
   gap:6px;
   flex-wrap:wrap;
 }
 
-/* Generic */
+/* ===== GENERIC ===== */
 .row{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .muted{color:var(--muted);font-size:12px}
 
-/* Fullscreen */
+/* ===== FULLSCREEN ===== */
 #fsBackdrop{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9998;display:none}
 #fsBackdrop.show{display:block}
 .card.card-full{position:fixed;z-index:9999;inset:10px;width:auto;height:auto;max-width:none;left:0;right:0;transform:none;display:flex;flex-direction:column;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,.3)}
@@ -177,16 +177,16 @@ body.density-compact .grid{
 .footer{padding:16px;text-align:center;color:var(--muted)}
 
 /* ===== MODAL ===== */
-#modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0,0,0,.55); z-index: 2000; }
-#modal.show { display: flex; }
+#modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.55);z-index:2000}
+#modal.show{display:flex}
 #modal .modal-card{
   width:min(560px,calc(100% - 32px));
   max-height:calc(100vh - 32px);
-  overflow:auto; background:var(--panel); border:1px solid var(--border);
-  border-radius:14px; box-shadow:0 20px 60px rgba(0,0,0,.6); padding:16px;
+  overflow:auto;background:var(--panel);border:1px solid var(--border);
+  border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.6);padding:16px;
 }
 
-/* ===== RSS ITEM STYLES ===== */
+/* ===== RSS ===== */
 .rss .rss-item{display:flex;gap:10px;align-items:flex-start;padding:8px 6px;border-bottom:1px dashed var(--border)}
 .rss .rss-item:last-child{border-bottom:0}
 .rss .thumb{width:56px;height:56px;flex:0 0 56px;border-radius:8px;object-fit:cover;border:1px solid var(--border);background:#0a1522}
